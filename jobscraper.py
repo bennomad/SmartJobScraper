@@ -157,7 +157,6 @@ def scrape_jobs_from_indeed(url, pages=1):
             title = title_element.text
             # Extract the job link
             job_link = title_element.get_attribute('href')
-            print(title)
             # Check if the link is relative and prepend the domain if necessary
             if job_link.startswith("/"):
                 job_link = domain + job_link
