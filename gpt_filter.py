@@ -1,11 +1,7 @@
 from openai import OpenAI
 import os
-from dotenv import load_dotenv
 from tqdm import tqdm
 import sys
-
-load_dotenv()
-
 
 def filter_job_titles_by_interest(openai_api_key, job_titles, user_interests, jobs_to_avoid):
 
