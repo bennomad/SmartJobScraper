@@ -37,25 +37,21 @@ pip install openai pandas selenium tqdm webdriver-manager
 - **Indeed Scraping**: To scrape jobs from Indeed, use the `--indeed` flag:
 
     ```bash
-    python main.py --indeed
+    python3 jobscraper.py --indeed
     ```
 
 - **Stepstone Scraping**: To scrape jobs from Stepstone, use the `--stepstone` flag:
 
     ```bash
-    python main.py --stepstone
+    python3 jobscraper.py --stepstone
     ```
 
 - **Filtering Jobs**: To filter all job results based on interests with AI-powered analysis, use the `--filter` flag:
 
     ```bash
-    python main.py --filter
+    python3 jobscraper.py --filter
     ```
 
 ## General Information and Disclaimer
 
 This project is intended for personal use and educational purposes. Scraping websites can be against their terms of service. Please use this tool responsibly and ethically, respecting the websites' terms and conditions. The developer assumes no responsibility for any misuse of this software or any violations of terms of service.
-
----
-
-Feel free to adjust the content according to your project's specific features, setup instructions, or any additional functionality you might add later.
