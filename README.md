@@ -10,6 +10,8 @@ This project requires Python 3.6+ and several third-party libraries. You can ins
 pip install openai pandas selenium tqdm webdriver-manager
 ```
 
+- **Chrome Browser**: Ensure you have the latest version of Chrome installed on your computer as this script uses Selenium with ChromeDriver for web scraping.
+  
 ## Getting Started
 
 ### Step 1: Basic Setup
@@ -51,6 +53,7 @@ pip install openai pandas selenium tqdm webdriver-manager
     ```bash
     python3 jobscraper.py --filter
     ```
+After the scraping and filtering process completes, the results will be compiled into an HTML file, which will automatically be opened in your default web browser for easy viewing.
 
 ## General Information and Disclaimer
 
