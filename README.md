@@ -55,7 +55,3 @@ pip install openai pandas selenium tqdm webdriver-manager
 ## General Information and Disclaimer
 
 This project is intended for personal use and educational purposes. Scraping websites can be against their terms of service. Please use this tool responsibly and ethically, respecting the websites' terms and conditions. The developer assumes no responsibility for any misuse of this software or any violations of terms of service.
-
----
-
-Feel free to adjust the content according to your project's specific features, setup instructions, or any additional functionality you might add later.
