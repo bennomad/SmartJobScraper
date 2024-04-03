@@ -10,7 +10,7 @@ This project requires Python 3.6+ and several third-party libraries. You can ins
 pip install openai pandas selenium tqdm webdriver-manager
 ```
 
-- **Chrome Browser**: Ensure you have the latest version of Chrome installed on your computer as this script uses Selenium with ChromeDriver for web scraping.
+- **Chrome Browser**: Ensure you have the latest version of Chrome installed on your computer as this script uses Selenium with ChromeDriver for web scraping. Chrome will run in non-headless mode, meaning a browser window will visibly open and navigate through the sites during the scraping process. This approach is used as headless mode can sometimes cause issues with site interactions. 
   
 ## Getting Started
 
