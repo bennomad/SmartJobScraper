@@ -9,7 +9,7 @@ def filter_job_titles_by_interest(openai_api_key, job_titles, user_interests, jo
 
     print("Total jobs:", len(job_titles))
     # Splitting job titles into batches of a manageable size
-    batch_size = 50  # Example size, adjust based on experimentation
+    batch_size = 100  # Example size, adjust based on experimentation
     batches = [job_titles[i:i + batch_size] for i in range(0, len(job_titles), batch_size)]
     print(f"Splitting the total jobs into {len(batches)} API requests.")
 
