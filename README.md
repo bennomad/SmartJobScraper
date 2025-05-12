@@ -1,6 +1,8 @@
 # Smart Job Scraper
 
-Smart Job Scraper is a powerful tool designed to streamline the job search process. By leveraging advanced web scraping techniques and AI-powered filtering, this script fetches job listings from Indeed and Stepstone, then filters them based on user-defined interests and criteria.
+Smart Job Scraper is a powerful tool designed to streamline the job search process. By leveraging advanced web scraping techniques and AI-powered filtering, this script fetches job listings from Stepstone (and previously Indeed), then filters them based on user-defined interests and criteria.
+
+> **Note:** Scraping from Indeed is currently **not working** as Indeed has implemented a Cloudflare check that blocks automated access. Only Stepstone scraping is supported at this time.
 
 ## Installation
 
@@ -16,7 +18,7 @@ pip install openai pandas selenium tqdm webdriver-manager
 
 ### Step 1: Basic Setup
 
-1. **Scraping URLs Setup**: Manually navigate to Stepstone and Indeed websites in your browser. Apply basic filters according to your preferences and copy the URLs into the `config.json` file under `stepstone_url` and `indeed_url`.
+1. **Scraping URLs Setup**: Manually navigate to Stepstone (and previously Indeed) websites in your browser. Apply basic filters according to your preferences and copy the URLs into the `config.json` file under `stepstone_url` (and `indeed_url` if/when supported again).
 
 ### Step 2: OpenAI API Setup
 
@@ -41,6 +43,7 @@ pip install openai pandas selenium tqdm webdriver-manager
     ```bash
     python3 jobscraper.py --indeed
     ```
+    > **Currently not working:** Indeed scraping is disabled due to Cloudflare protection. This feature will be restored if a workaround is found.
 
 - **Stepstone Scraping**: To scrape jobs from Stepstone, use the `--stepstone` flag:
 
