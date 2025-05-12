@@ -23,6 +23,7 @@ import argparse
 from gpt_filter import filter_job_titles_by_interest
 import json
 import webbrowser
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 
 def initialize_driver():
@@ -98,13 +99,32 @@ def load_config(config_file="config.json"):
         return {}
 
 def scrape_jobs_from_stepstone(url, pages=1):
+    print("Initializing web driver...")
     driver = initialize_driver()
+    print("Opening URL...")
     driver.get(url)
+    print("Handling cookie consent...")
     handle_cookies(driver)
 
+    # Extract domain from the URL for relative links
+    parsed_url = urlparse(url)
+    domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    base_path = parsed_url.path
+    query_dict = parse_qs(parsed_url.query)
+
     jobs_data = []
-    for _ in tqdm(range(pages)):
+    for page in tqdm(range(1, pages + 1)):
+        # Set the 'page' parameter in the query string
+        query_dict['page'] = [str(page)]
+        new_query = urlencode(query_dict, doseq=True)
+        new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
+        driver.get(new_url)
+        print("Navigated to:", driver.current_url)
+        time.sleep(3)  # Increase sleep to observe the change
         job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
+        if not job_cards:
+            print(f"No job cards found on page {page}. Stopping pagination.")
+            break
         for job_card in job_cards:
             title = job_card.find_element(By.XPATH, './/h2').text
             job_link_element = job_card.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
@@ -113,29 +133,12 @@ def scrape_jobs_from_stepstone(url, pages=1):
             # Check if the link is relative and prepend the domain if necessary
             if job_link.startswith("/"):
                 job_link = domain + job_link
-            # Example of scraping job description with a hypothetical class name
-            # Attempt to find a description or print part of the HTML for inspection
             try:
                 description_element = job_card.find_element(By.XPATH, './/div[@data-at="jobcard-content"]')
                 description = description_element.text
             except Exception as e:
                 description = "No description available"
             jobs_data.append({'title': title, 'description': description, 'link': job_link})
-
-        # Attempt to go to the next page
-        try:
-            current_url = driver.current_url
-            next_page_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, '//a[@aria-label="Next"]'))
-            )
-            next_page_btn.click()
-            # Wait for the URL to change or for a specific element that signifies a new page has loaded
-            WebDriverWait(driver, 10).until(lambda driver: driver.current_url != current_url)
-        except Exception as e:
-            print("Error: Navigating to next page failed or last page reached:", str(e))
-            print("All found jobs up to now will be saved.")
-            return pd.DataFrame(jobs_data)
-        time.sleep(2)
 
     driver.quit()
     return pd.DataFrame(jobs_data)
@@ -309,10 +312,6 @@ def filter_and_output_jobs(jobs_df, aligned_titles):
     html_file_path = os.path.abspath(html_filename)
     webbrowser.open('file://' + html_file_path)
 
-def user_confirmation_to_overwrite(filename):
-    response = input(f"The file {filename} already exists. Do you want to overwrite it? (y/n): ")
-    return response.lower() == 'y'
-
 def main():
     indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
     stepstone_filename = construct_file_path("data", "stepstone_jobs_df.pkl")
@@ -335,42 +334,25 @@ def main():
     stepstone_exists = os.path.isfile(stepstone_filename)
 
     if args.indeed:
-        if indeed_exists and not user_confirmation_to_overwrite(indeed_filename):
-            print(f"Skipping scraping for Indeed. {indeed_filename} was not overwritten.")
-        else:
-            jobs_df = scrape_jobs('indeed', indeed_url)
-            jobs_df.to_pickle(indeed_filename)
-            print("Finished scraping Indeed and saved jobs to pickle file.")
+        jobs_df = scrape_jobs('indeed', indeed_url)
+        jobs_df.to_pickle(indeed_filename)
+        print("Finished scraping Indeed and saved jobs to pickle file.")
     elif args.stepstone:
-        if stepstone_exists and not user_confirmation_to_overwrite(stepstone_filename):
-            print(f"Skipping scraping for StepStone. {stepstone_filename} was not overwritten.")
-        else:
-            jobs_df = scrape_jobs('stepstone', stepstone_url)
-            jobs_df.to_pickle(stepstone_filename)
-            print("Finished scraping StepStone and saved jobs to pickle file.")
-
+        jobs_df = scrape_jobs('stepstone', stepstone_url)
+        jobs_df.to_pickle(stepstone_filename)
+        print("Finished scraping StepStone and saved jobs to pickle file.")
     else:
-        if indeed_exists and stepstone_exists:
-            print("Both Indeed and StepStone job files found.")
-            choice = input("Specify which one to use ('indeed' or 'stepstone'): ").lower().strip()
+        print("Both Indeed and StepStone job files found.")
+        choice = input("Specify which one to use ('indeed' or 'stepstone'): ").lower().strip()
 
-            if choice == 'indeed':
-                print("Loading Indeed job file.")
-                jobs_df = pd.read_pickle(indeed_filename)
-            elif choice == 'stepstone':
-                print("Loading StepStone job file.")
-                jobs_df = pd.read_pickle(stepstone_filename)
-            else:
-                print("Invalid choice. Exiting.")
-                sys.exit()
-        elif indeed_exists:
-            print("Found Indeed job file.")
+        if choice == 'indeed':
+            print("Loading Indeed job file.")
             jobs_df = pd.read_pickle(indeed_filename)
-        elif stepstone_exists:
-            print("Found StepStone job file.")
+        elif choice == 'stepstone':
+            print("Loading StepStone job file.")
             jobs_df = pd.read_pickle(stepstone_filename)
         else:
-            print("Error: No jobs scraped yet.")
+            print("Invalid choice. Exiting.")
             sys.exit()
 
         if args.filter:

@@ -1,3 +1,6 @@
 temp_work/
 .idea/
 __pycache__/
+venv
+config.json
+filtered_jobs.html
