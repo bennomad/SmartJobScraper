@@ -303,33 +303,30 @@ def generate_html_table(df):
     return html
 
 
-def filter_and_output_jobs(jobs_df, filter_result):
-    # filter_result is a dict with keys 'home_office' and 'other'
-    html_filename_home = "filtered_jobs_homeoffice.html"
-    html_filename_other = "filtered_jobs_other.html"
+def filter_and_output_jobs(jobs_df, aligned_titles):
+    html_filename = "filtered_jobs.html"
 
-    # Helper to filter and output
-    def filter_and_save(titles, filename, label):
-        jobs_df['title_lower'] = jobs_df['title'].str.lower()
-        titles_lower = [title.lower() for title in titles]
-        filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(titles_lower)]
-        found_titles_lower = set(filtered_jobs_df['title_lower'])
-        for title in titles_lower:
-            if title not in found_titles_lower:
-                print(f"{label} - Title not found: {title}")
-        filtered_jobs_df = filtered_jobs_df.copy()
-        filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-        create_html_output(filtered_jobs_df, filename)
-        print(f"{label} jobs: {len(filtered_jobs_df)}. HTML Export done: {filename}")
-        return os.path.abspath(filename)
+    # Convert job titles in DataFrame to lowercase for case-insensitive matching
+    jobs_df['title_lower'] = jobs_df['title'].str.lower()
+    # Convert aligned_titles to lowercase
+    aligned_titles_lower = [title.lower() for title in aligned_titles]
 
-    path_home = filter_and_save(filter_result['home_office'], html_filename_home, "Home Office")
-    path_other = filter_and_save(filter_result['other'], html_filename_other, "Other")
+    # Filter DataFrame to keep rows where 'title_lower' matches any of the aligned titles
+    filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(aligned_titles_lower)]
 
-    print(f"Opening Home Office jobs in browser: {path_home}")
-    webbrowser.open('file://' + path_home)
-    print(f"Opening Other jobs in browser: {path_other}")
-    webbrowser.open('file://' + path_other)
+    # Debug output for titles not found
+    found_titles_lower = set(filtered_jobs_df['title_lower'])
+    for title in aligned_titles_lower:
+        if title not in found_titles_lower:
+            print(f"Title not found: {title}")
+
+    filtered_jobs_df = filtered_jobs_df.copy()
+    filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
+
+    create_html_output(filtered_jobs_df, html_filename)
+    print("Filtering completed. HTML Export done. Opening HTML file in default browser...")
+    html_file_path = os.path.abspath(html_filename)
+    webbrowser.open('file://' + html_file_path)
 
 def main():
     indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
@@ -347,6 +344,7 @@ def main():
     indeed_url = config.get("indeed_url", "")
     user_interests = config.get("user_interests", [])
     jobs_to_avoid = config.get("jobs_to_avoid", [])
+    homeoffice_required = config.get("homeoffice_required", False)
 
     if args.indeed:
         # Load existing jobs
@@ -392,9 +390,9 @@ def main():
 
     if args.filter:
         jobs_list = jobs_df[['title', 'description']].to_dict(orient='records')
-        filter_result = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid)
-        print(f"Processing of jobs complete. Keeping {len(filter_result['home_office'])} home office jobs and {len(filter_result['other'])} other jobs.")
-        filter_and_output_jobs(jobs_df, filter_result)
+        filtered_titles = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required)
+        print(f"Processing of jobs complete. Keeping {len(filtered_titles)} jobs.")
+        filter_and_output_jobs(jobs_df, filtered_titles)
     else:
         print("Missing arguments.")
         print("""

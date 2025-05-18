@@ -3,20 +3,19 @@ import os
 from tqdm import tqdm
 import sys
 
-def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid):
+def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False):
     """
     jobs: list of dicts, each with 'title' and 'description'
-    Returns: dict with keys 'home_office' and 'other', each a list of job titles.
+    homeoffice_required: if True, only keep jobs that are very likely 100% home office/remote
     """
     client = OpenAI(api_key=openai_api_key)
 
     print("Total jobs:", len(jobs))
-    batch_size = 40  # Reduce batch size for more context
+    batch_size = 50  # Reduce batch size since descriptions are longer
     batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
     print(f"Splitting the total jobs into {len(batches)} API requests.")
 
-    all_home_office = []
-    all_other = []
+    all_filtered_titles = []
 
     print("Processing jobs (title + description)...")
     for batch in tqdm(batches, desc="Filtering Progress"):
@@ -25,14 +24,23 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid)
         interests_str = ", ".join(user_interests)
         jobs_to_avoid_str = " , ".join(jobs_to_avoid)
 
+        if homeoffice_required:
+            homeoffice_instruction = (
+                "Additionally, ONLY include job titles where it is VERY LIKELY that the job can be performed 100% from home (full remote). "
+                "Be strict: Use all clues from the title and description, including synonyms and phrases like 'remote', 'work from anywhere', 'fully distributed', 'home office', '100% remote', 'completely remote', 'work from home', etc. "
+                "If there is any doubt, or if the job is only partially remote, hybrid, or the remote status is unclear, EXCLUDE the job. "
+                "Err on the side of caution and only keep jobs where 100% home office is almost certain. "
+                "Return only the job titles, separated by a pipe symbol."
+            )
+        else:
+            homeoffice_instruction = "Return only the job titles, separated by a pipe symbol."
+
         prompt_message = (
             f"Given the user's interests are in {interests_str}, and aiming to avoid positions such as {jobs_to_avoid_str}, "
             f"carefully review the following job listings, each separated by a pipe symbol. Each listing is formatted as 'Title: ... || Description: ...': {jobs_str}. "
-            "Please separate the job titles into two categories, each as a pipe-separated list:\n"
-            "1. home_office: Only include job titles where it is very likely (based on strong cues in title or description) that 100% home office or fully remote work is possible. Only include if the job is clearly 100% remote, e.g., phrases like '100% home office', 'fully remote', 'remote only', 'work from anywhere', 'remote-first', 'remote possible for all tasks', etc. If in doubt, do NOT include.\n"
-            "2. other: All other job titles that match the user's interests and do not fall into the avoidance categories, but are not clearly 100% home office.\n"
-            "Exclude titles only if they are clearly unrelated or are listed in the categories to avoid.\n"
-            "Return your answer as JSON with two keys: 'home_office' and 'other', each containing a pipe-separated string of job titles."
+            "Please list, separated by a pipe symbol, the job titles that align"
+            "with the user's interests and do not fall into the categories to avoid. "
+            f"{homeoffice_instruction}"
         )
         try:
             response = client.chat.completions.create(
@@ -41,28 +49,26 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid)
                     {"role": "system",
                      "content": (
                         "You are a helpful assistant. Each job listing is separated by a pipe symbol and contains a title and description. "
-                        "Your task is to identify job titles that align with the user's specified interests, no matter how tangentially, and to avoid suggesting titles in the specified categories to avoid. "
-                        "You must separate the job titles into two categories: 'home_office' (only if 100% remote is very likely, based on strong cues in title/description, e.g., 'fully remote', 'remote only', '100% home office', 'work from anywhere', 'remote-first', 'remote possible for all tasks', etc. If in doubt, do NOT include) and 'other' (all other jobs matching interests but not clearly 100% remote). "
-                        "Return your answer as JSON with two keys: 'home_office' and 'other', each containing a pipe-separated string of job titles."
+                        "Your task is to identify job titles that align with the user's specified interests, and to avoid suggesting titles in the specified categories to avoid. "
+                        "Use a pipe symbol to separate titles. Exclude titles that are clearly unrelated or fall into the avoidance categories. "
+                        + (
+                            "Additionally, ONLY include job titles where it is VERY LIKELY that the job can be performed 100% from home (full remote). "
+                            "Be strict: Use all clues from the title and description, including synonyms and phrases like 'remote', 'work from anywhere', 'fully distributed', 'home office', '100% remote', 'completely remote', 'work from home', etc. "
+                            "If there is any doubt, or if the job is only partially remote, hybrid, or the remote status is unclear, EXCLUDE the job. "
+                            "Err on the side of caution and only keep jobs where 100% home office is almost certain. "
+                            if homeoffice_required else ""
+                        ) +
+                        "Return only the job titles, separated by a pipe symbol."
                     )},
                     {"role": "user", "content": prompt_message}
                 ]
             )
-            import json as _json
-            content = response.choices[0].message.content.strip()
-            # Try to parse the JSON from the response
-            try:
-                result = _json.loads(content)
-                home_office = [title.strip().rstrip('.') for title in result.get('home_office', '').split('|') if title.strip()]
-                other = [title.strip().rstrip('.') for title in result.get('other', '').split('|') if title.strip()]
-            except Exception:
-                # fallback: try to extract lists manually if JSON parsing fails
-                home_office = []
-                other = []
-            all_home_office.extend(home_office)
-            all_other.extend(other)
+
+            filtered_titles = response.choices[0].message.content.strip().split('|')
+            all_filtered_titles.extend(filtered_titles)
         except Exception as e:
             print(f"An error occurred while processing a batch: {e}")
             sys.exit()
 
-    return {"home_office": all_home_office, "other": all_other}
+    all_filtered_titles = [title.strip().rstrip('.') for title in all_filtered_titles if title.strip()]
+    return all_filtered_titles

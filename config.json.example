@@ -5,5 +5,6 @@
   "indeed_url": "https://de.indeed.com/jobs?q=&l=Berlin&fromage=14&sort=date",
 
   "user_interests": ["IT", "Software Development"],
-  "jobs_to_avoid": ["senior", "expert", "internship", "educational training", "Data Analysis", "SAP"]
+  "jobs_to_avoid": ["senior", "expert", "internship", "educational training", "Data Analysis", "SAP"],
+  "homeoffice_required": true  // If true, only jobs with 100% home office or equivalent remote flexibility will be considered
 }
