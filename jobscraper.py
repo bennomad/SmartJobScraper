@@ -1,3 +1,18 @@
+import os
+import sys
+import glob
+import time
+import pickle
+import json
+import hashlib
+import traceback
+from datetime import datetime, timedelta
+from collections import Counter
+import argparse
+import pandas as pd
+import re
+from tqdm import tqdm
+import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -6,28 +21,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import pandas as pd
-import re
-from tqdm import tqdm
-import time
-import os
-import hashlib
-import pickle
-from datetime import datetime
-import sys
-import traceback
-from collections import Counter
-import re
-from datetime import timedelta
-import argparse
 from gpt_filter import filter_jobs_by_interest
-import json
-import webbrowser
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 
 def initialize_driver():
     options = Options()
+    options.add_argument('--headless')
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
@@ -144,26 +144,48 @@ def scrape_jobs_from_stepstone(url, pages=1):
         new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
         driver.get(new_url)
         print("Navigated to:", driver.current_url)
-        time.sleep(3)  # Increase sleep to observe the change
+        time.sleep(2) 
         job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
         if not job_cards:
             print(f"No job cards found on page {page}. Stopping pagination.")
             break
-        for job_card in job_cards:
-            title = job_card.find_element(By.XPATH, './/h2').text
-            job_link_element = job_card.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
-            job_link = job_link_element.get_attribute('href')
-
-            # Check if the link is relative and prepend the domain if necessary
-            if job_link.startswith("/"):
+        for job in job_cards:
+            title = job.find_element(By.XPATH, './/h2').text
+            link_el = job.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
+            job_link = link_el.get_attribute('href')
+            if job_link.startswith('/'):
                 job_link = domain + job_link
-            try:
-                description_element = job_card.find_element(By.XPATH, './/div[@data-at="jobcard-content"]')
-                description = description_element.text
-            except Exception as e:
-                description = "No description available"
-            jobs_data.append({'title': title, 'description': description, 'link': job_link})
 
+            # NEW: company name
+            try:
+                company = job.find_element(
+                    By.XPATH, './/span[@data-at="job-item-company-name"]'
+                ).text.strip()
+            except Exception:
+                company = ''
+
+            # NEW: location string (can be several cities separated by commas)
+            try:
+                location = job.find_element(
+                    By.XPATH, './/span[@data-at="job-item-location"]'
+                ).text.strip()
+            except Exception:
+                location = ''
+
+            try:
+                description = job.find_element(
+                    By.XPATH, './/div[@data-at="jobcard-content"]'
+                ).text
+            except Exception:
+                description = ''
+
+            jobs_data.append({
+                'title': title,
+                'company': company,
+                'location': location,
+                'description': description,
+                'link': job_link
+            })
     driver.quit()
     return pd.DataFrame(jobs_data)
 
@@ -233,109 +255,62 @@ def construct_file_path(folder, filename):
     # Return the full path ready for use
     return file_path
 
-def create_html_output(filtered_jobs_df, filename):
-    # Select only 'title' and 'link' for HTML presentation
-    df = filtered_jobs_df[['title', 'link']]
-
-    # Convert 'link' column to HTML anchor tags
-    df.loc[:, 'link'] = df['link'].apply(lambda x: f'<a href="{x}">Link</a>')
-
-    # Export to HTML, integrating the CSS and nightmode
-    current_hour = datetime.now().hour
-    night_mode = current_hour >= 18 or current_hour < 8
-    css_filename = "style_dark.css" if night_mode else "style_normal.css"
-    css_choice = os.path.join('template', css_filename)
-
-    # Generate HTML for the DataFrame
-    html_table = generate_html_table(df)
-
-    # Complete HTML document
-    html_output = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Job Listings</title>
-        <link rel="stylesheet" type="text/css" href="{css_choice}">
-        <script>
-        function getSelectedRows() {{
-            const selectedIds = [];
-            document.querySelectorAll('input[name="rowCheckbox"]:checked').forEach((checkbox) => {{
-                selectedIds.push(checkbox.value);
-            }});
-            alert("Selected IDs: " + selectedIds.join(", "));
-        }}
-    </script>
-    </head>
-    <body>
-        <h2 style="text-align:center;">Job Listings</h2>
-        {html_table}
-        <button onclick="getSelectedRows()">Get Selected IDs</button>
-
-    </body>
-    </html>
-    """
-    # Save the HTML file
-    with open(filename, "w") as f:
-        f.write(html_output)
-
-
-def generate_html_table(df):
-    table_styles = "style='width: 60%; border-collapse: collapse;'"
-    html = f"<table {table_styles}>"
-    # Add column headers, including one for checkboxes
-    html += "<tr>"
-    for col in df.columns:
-        formatted_col = col.capitalize()  # Capitalize the first letter, rest lowercase
-        html += f"<th>{formatted_col}</th>"
-    html += "<th>Select</th>"
-    html += "</tr>"
-
-    # Add rows with a checkbox in the first column
-    for index, row in df.iterrows():
-        html += f"<tr>"
-        for item in row:
-            html += f"<td>{item}</td>"
-        html += f"<td><input type='checkbox' name='rowCheckbox' value='{index}'></td>"
-        html += "</tr>"
-
-    html += "</table>"
-    return html
-
+def run_streamlit_dashboard(filtered_jobs_df):
+    st.set_page_config(page_title="Job Listings", layout="wide")
+    st.title("Job Listings")
+    st.write(f"{len(filtered_jobs_df)} jobs found.")
+    filtered_jobs_df = filtered_jobs_df.reset_index(drop=True)
+    filtered_jobs_df['Select'] = False
+    # Sort by company name if the column exists
+    if 'company' in filtered_jobs_df.columns:
+        filtered_jobs_df = filtered_jobs_df.sort_values(by='company', na_position='last').reset_index(drop=True)
+    # Show title, company, location, and link in the main table, and make link clickable
+    columns = ['title', 'company', 'location', 'link', 'Select']
+    # Only include columns that exist in the DataFrame (for backward compatibility)
+    columns = [col for col in columns if col in filtered_jobs_df.columns]
+    table_df = filtered_jobs_df[columns].copy()
+    # Use LinkColumn for clickable links
+    selected = st.data_editor(
+        table_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        disabled=[col for col in ['title', 'link', 'company', 'location'] if col in table_df.columns],
+        column_config={
+            "link": st.column_config.LinkColumn("Link", display_text="Open Link")
+        } if 'link' in table_df.columns else None
+    )
+    st.write("Selected job indices:", list(selected[selected['Select']].index))
+    for idx, row in selected[selected['Select']].iterrows():
+        st.markdown(f"**{row['title']}**  ")
+        if 'company' in row:
+            st.markdown(f"*Company:* {row['company']}")
+        if 'location' in row:
+            st.markdown(f"*Location:* {row['location']}")
+        st.markdown(f"[Link to job posting]({filtered_jobs_df.loc[idx, 'link']})")
+        st.markdown("---")
 
 def filter_and_output_jobs(jobs_df, aligned_titles):
-    html_filename = "filtered_jobs.html"
-
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
-    # Convert aligned_titles to lowercase
     aligned_titles_lower = [title.lower() for title in aligned_titles]
-
-    # Filter DataFrame to keep rows where 'title_lower' matches any of the aligned titles
     filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(aligned_titles_lower)]
-
-    # Debug output for titles not found
     found_titles_lower = set(filtered_jobs_df['title_lower'])
     for title in aligned_titles_lower:
         if title not in found_titles_lower:
             print(f"Title not found: {title}")
-
     filtered_jobs_df = filtered_jobs_df.copy()
     filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-
-    create_html_output(filtered_jobs_df, html_filename)
-    print("Filtering completed. HTML Export done. Opening HTML file in default browser...")
-    html_file_path = os.path.abspath(html_filename)
-    webbrowser.open('file://' + html_file_path)
+    run_streamlit_dashboard(filtered_jobs_df)
 
 def main():
     indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
     stepstone_filename = construct_file_path("data", "stepstone_jobs_df.pkl")
 
     parser = argparse.ArgumentParser(description="AI Job scraper script")
-    parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')
+    parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')  # Currently disabled
     parser.add_argument('--stepstone', action='store_true', help='Scrape jobs from StepStone')
     parser.add_argument('--filter', action='store_true', help='Filter job offers by interests')
+    parser.add_argument('--dashboard', action='store_true', help='Show the dashboard for the latest job file')
     args = parser.parse_args()
 
     config = load_config()
@@ -346,19 +321,36 @@ def main():
     jobs_to_avoid = config.get("jobs_to_avoid", [])
     homeoffice_required = config.get("homeoffice_required", False)
 
-    if args.indeed:
-        # Load existing jobs
-        existing_jobs_df = load_existing_jobs(indeed_filename)
-        # Scrape new jobs
-        new_jobs_df = scrape_jobs('indeed', indeed_url)
-        # Get only unique new jobs
-        unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
-        # Combine existing and new unique jobs
-        combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
-        # Save combined jobs
-        combined_jobs_df.to_pickle(indeed_filename)
-        print(f"Added {len(unique_new_jobs)} new jobs to Indeed database. Total jobs: {len(combined_jobs_df)}")
-        jobs_df = combined_jobs_df
+    # Move dashboard logic to the top
+    if args.dashboard:
+        files = [
+            (f, os.path.getmtime(f)) for f in [indeed_filename, stepstone_filename] if os.path.exists(f)
+        ]
+        if not files:
+            print("No job file found. Please run scraping/filtering first.")
+            return
+        latest_file = max(files, key=lambda x: x[1])[0]
+        print(f"Loading jobs from {latest_file}")
+        jobs_df = pd.read_pickle(latest_file)
+        run_streamlit_dashboard(jobs_df)
+        return
+
+    # if args.indeed:
+    #     # Load existing jobs
+    #     existing_jobs_df = load_existing_jobs(indeed_filename)
+    #     # Scrape new jobs
+    #     new_jobs_df = scrape_jobs('indeed', indeed_url)
+    #     # Get only unique new jobs
+    #     unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
+    #     # Combine existing and new unique jobs
+    #     combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
+    #     # Save combined jobs
+    #     combined_jobs_df.to_pickle(indeed_filename)
+    #     print(f"Added {len(unique_new_jobs)} new jobs to Indeed database. Total jobs: {len(combined_jobs_df)}")
+    #     jobs_df = combined_jobs_df
+    #     # Indeed scraping is currently disabled due to Cloudflare protection.
+    #     # Only StepStone scraping is supported at this time.
+    #     return
 
     elif args.stepstone:
         # Load existing jobs
@@ -373,20 +365,10 @@ def main():
         combined_jobs_df.to_pickle(stepstone_filename)
         print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
         jobs_df = combined_jobs_df
-
     else:
-        print("Both Indeed and StepStone job files found.")
-        choice = input("Specify which one to use ('indeed' or 'stepstone'): ").lower().strip()
-
-        if choice == 'indeed':
-            print("Loading Indeed job file.")
-            jobs_df = pd.read_pickle(indeed_filename)
-        elif choice == 'stepstone':
-            print("Loading StepStone job file.")
-            jobs_df = pd.read_pickle(stepstone_filename)
-        else:
-            print("Invalid choice. Exiting.")
-            sys.exit()
+        # Default to StepStone if no argument is given
+        print("Defaulting to StepStone job file.")
+        jobs_df = pd.read_pickle(stepstone_filename)
 
     if args.filter:
         jobs_list = jobs_df[['title', 'description']].to_dict(orient='records')
