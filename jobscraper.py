@@ -20,7 +20,7 @@ from collections import Counter
 import re
 from datetime import timedelta
 import argparse
-from gpt_filter import filter_job_titles_by_interest
+from gpt_filter import filter_jobs_by_interest
 import json
 import webbrowser
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
@@ -98,6 +98,30 @@ def load_config(config_file="config.json"):
         print("Error parsing the configuration file.")
         return {}
 
+def load_existing_jobs(filename):
+    """Load existing jobs from pickle file if it exists."""
+    if os.path.exists(filename):
+        try:
+            return pd.read_pickle(filename)
+        except Exception as e:
+            print(f"Error loading existing jobs: {e}")
+            return pd.DataFrame(columns=['title', 'description', 'link'])
+    return pd.DataFrame(columns=['title', 'description', 'link'])
+
+def get_unique_jobs(existing_df, new_df):
+    """Compare existing and new jobs, return only unique new jobs."""
+    if existing_df.empty:
+        return new_df
+    
+    # Create a set of existing job links for quick lookup
+    existing_links = set(existing_df['link'])
+    
+    # Filter new jobs to only include those not in existing_links
+    unique_new_jobs = new_df[~new_df['link'].isin(existing_links)]
+    
+    print(f"Found {len(unique_new_jobs)} new unique jobs out of {len(new_df)} total jobs")
+    return unique_new_jobs
+
 def scrape_jobs_from_stepstone(url, pages=1):
     print("Initializing web driver...")
     driver = initialize_driver()
@@ -158,28 +182,21 @@ def scrape_jobs_from_indeed(url, pages=1):
             title_element = job_card.find_element(By.CSS_SELECTOR,
                                                   'h2.jobTitle.css-14z7akl.eu4oa1w0 a.jcs-JobTitle.css-jspxzf.eu4oa1w0')
             title = title_element.text
-            # Extract the job link
             job_link = title_element.get_attribute('href')
-            # Check if the link is relative and prepend the domain if necessary
             if job_link.startswith("/"):
-                job_link = domain + job_link
-            # Example of scraping job description with a hypothetical class name
-            # Attempt to find a description or print part of the HTML for inspection
+                job_link = "https://de.indeed.com" + job_link
             jobs_data.append({'title': title, 'description': "", 'link': job_link})
 
-        # Attempt to go to the next page
         try:
             current_url = driver.current_url
             next_page_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, '//a[@aria-label="Next Page"]'))
             )
             next_page_btn.click()
-            # Wait for the URL to change or for a specific element that signifies a new page has loaded
             WebDriverWait(driver, 10).until(lambda driver: driver.current_url != current_url)
         except Exception as e:
             print("Error: Navigating to next page failed or last page reached:", str(e))
-            print("All found jobs up to now will be saved.")
-            return pd.DataFrame(jobs_data)
+            break
 
     driver.quit()
     return pd.DataFrame(jobs_data)
@@ -286,31 +303,33 @@ def generate_html_table(df):
     return html
 
 
-def filter_and_output_jobs(jobs_df, aligned_titles):
-    html_filename = "filtered_jobs.html"
+def filter_and_output_jobs(jobs_df, filter_result):
+    # filter_result is a dict with keys 'home_office' and 'other'
+    html_filename_home = "filtered_jobs_homeoffice.html"
+    html_filename_other = "filtered_jobs_other.html"
 
-    # Convert job titles in DataFrame to lowercase for case-insensitive matching
-    jobs_df['title_lower'] = jobs_df['title'].str.lower()
-    # Convert aligned_titles to lowercase
-    aligned_titles_lower = [title.lower() for title in aligned_titles]
+    # Helper to filter and output
+    def filter_and_save(titles, filename, label):
+        jobs_df['title_lower'] = jobs_df['title'].str.lower()
+        titles_lower = [title.lower() for title in titles]
+        filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(titles_lower)]
+        found_titles_lower = set(filtered_jobs_df['title_lower'])
+        for title in titles_lower:
+            if title not in found_titles_lower:
+                print(f"{label} - Title not found: {title}")
+        filtered_jobs_df = filtered_jobs_df.copy()
+        filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
+        create_html_output(filtered_jobs_df, filename)
+        print(f"{label} jobs: {len(filtered_jobs_df)}. HTML Export done: {filename}")
+        return os.path.abspath(filename)
 
-    # Filter DataFrame to keep rows where 'title_lower' matches any of the aligned titles
-    filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(aligned_titles_lower)]
+    path_home = filter_and_save(filter_result['home_office'], html_filename_home, "Home Office")
+    path_other = filter_and_save(filter_result['other'], html_filename_other, "Other")
 
-    # Debug output for titles not found
-    found_titles_lower = set(filtered_jobs_df['title_lower'])
-    for title in aligned_titles_lower:
-        if title not in found_titles_lower:
-            print(f"Title not found: {title}")
-
-    filtered_jobs_df = filtered_jobs_df.copy()
-    filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-
-
-    create_html_output(filtered_jobs_df, html_filename)
-    print("Filtering completed. HTML Export done. Opening HTML file in default browser...")
-    html_file_path = os.path.abspath(html_filename)
-    webbrowser.open('file://' + html_file_path)
+    print(f"Opening Home Office jobs in browser: {path_home}")
+    webbrowser.open('file://' + path_home)
+    print(f"Opening Other jobs in browser: {path_other}")
+    webbrowser.open('file://' + path_other)
 
 def main():
     indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
@@ -329,18 +348,34 @@ def main():
     user_interests = config.get("user_interests", [])
     jobs_to_avoid = config.get("jobs_to_avoid", [])
 
-    # Check for existence of job files and handle cases
-    indeed_exists = os.path.isfile(indeed_filename)
-    stepstone_exists = os.path.isfile(stepstone_filename)
-
     if args.indeed:
-        jobs_df = scrape_jobs('indeed', indeed_url)
-        jobs_df.to_pickle(indeed_filename)
-        print("Finished scraping Indeed and saved jobs to pickle file.")
+        # Load existing jobs
+        existing_jobs_df = load_existing_jobs(indeed_filename)
+        # Scrape new jobs
+        new_jobs_df = scrape_jobs('indeed', indeed_url)
+        # Get only unique new jobs
+        unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
+        # Combine existing and new unique jobs
+        combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
+        # Save combined jobs
+        combined_jobs_df.to_pickle(indeed_filename)
+        print(f"Added {len(unique_new_jobs)} new jobs to Indeed database. Total jobs: {len(combined_jobs_df)}")
+        jobs_df = combined_jobs_df
+
     elif args.stepstone:
-        jobs_df = scrape_jobs('stepstone', stepstone_url)
-        jobs_df.to_pickle(stepstone_filename)
-        print("Finished scraping StepStone and saved jobs to pickle file.")
+        # Load existing jobs
+        existing_jobs_df = load_existing_jobs(stepstone_filename)
+        # Scrape new jobs
+        new_jobs_df = scrape_jobs('stepstone', stepstone_url)
+        # Get only unique new jobs
+        unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
+        # Combine existing and new unique jobs
+        combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
+        # Save combined jobs
+        combined_jobs_df.to_pickle(stepstone_filename)
+        print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
+        jobs_df = combined_jobs_df
+
     else:
         print("Both Indeed and StepStone job files found.")
         choice = input("Specify which one to use ('indeed' or 'stepstone'): ").lower().strip()
@@ -355,29 +390,29 @@ def main():
             print("Invalid choice. Exiting.")
             sys.exit()
 
-        if args.filter:
-            job_titles = jobs_df['title'].tolist()
-            filtered_titles = filter_job_titles_by_interest(openai_api_key, job_titles, user_interests, jobs_to_avoid)
-            print(f"Processing of job titles complete. Keeeping {len(filtered_titles)} jobs.")
-            filter_and_output_jobs(jobs_df, filtered_titles)
-        else:
-            print("Missing arguments.")
-            print("""
-                Job Scraper Tool Usage Guide:
-        
-                - Scrape Indeed: Use '--indeed' to scrape job listings from Indeed.
-        
-                - Scrape StepStone: Use '--stepstone' to scrape job listings from StepStone.
-        
-                - Filter job offers: After scraping, use '--filter' to keep only job offers which match with the specified interests.
-        
-                Example Usage:
-                  python job_scraper.py --indeed                 # To scrape jobs from Indeed and save the results in jobs.df.
-                  python job_scraper.py --stepstone              # To scrape jobs from StepStone and save the results in jobs.df.
-                  python job_scraper.py --filter                 # To filter the results based on interests.
-        
-                Note: These flags can be used individually or combined to customize your job search and data processing workflow.
-                """)
+    if args.filter:
+        jobs_list = jobs_df[['title', 'description']].to_dict(orient='records')
+        filter_result = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid)
+        print(f"Processing of jobs complete. Keeping {len(filter_result['home_office'])} home office jobs and {len(filter_result['other'])} other jobs.")
+        filter_and_output_jobs(jobs_df, filter_result)
+    else:
+        print("Missing arguments.")
+        print("""
+            Job Scraper Tool Usage Guide:
+    
+            - Scrape Indeed: Use '--indeed' to scrape job listings from Indeed.
+    
+            - Scrape StepStone: Use '--stepstone' to scrape job listings from StepStone.
+    
+            - Filter job offers: After scraping, use '--filter' to keep only job offers which match with the specified interests.
+    
+            Example Usage:
+              python job_scraper.py --indeed                 # To scrape jobs from Indeed and save the results in jobs.df.
+              python job_scraper.py --stepstone              # To scrape jobs from StepStone and save the results in jobs.df.
+              python job_scraper.py --filter                 # To filter the results based on interests.
+    
+            Note: These flags can be used individually or combined to customize your job search and data processing workflow.
+            """)
 
     print("Done.")
 

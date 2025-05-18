@@ -3,4 +3,4 @@ temp_work/
 __pycache__/
 venv
 config.json
-filtered_jobs.html
+*.html
