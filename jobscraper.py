@@ -144,12 +144,17 @@ def scrape_jobs_from_stepstone(url, pages=1):
         new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
         driver.get(new_url)
         print("Navigated to:", driver.current_url)
-        time.sleep(2) 
+        time.sleep(2)
         job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
         if not job_cards:
             print(f"No job cards found on page {page}. Stopping pagination.")
             break
-        for job in job_cards:
+        print("Processing job cards...")
+        # Open a new window for detail scraping
+        driver.execute_script("window.open('');")
+        detail_window = driver.window_handles[-1]
+        main_window = driver.current_window_handle
+        for job in tqdm(job_cards):
             title = job.find_element(By.XPATH, './/h2').text
             link_el = job.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
             job_link = link_el.get_attribute('href')
@@ -172,20 +177,44 @@ def scrape_jobs_from_stepstone(url, pages=1):
             except Exception:
                 location = ''
 
+            # Vollständige Beschreibung von der Detailseite holen
+            full_description = ''
             try:
-                description = job.find_element(
-                    By.XPATH, './/div[@data-at="jobcard-content"]'
-                ).text
-            except Exception:
-                description = ''
+                driver.switch_to.window(detail_window)
+                driver.get(job_link)
+                try:
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.TAG_NAME, 'article'))
+                    )
+                except Exception:
+                    print(f"Error loading detail page for {job_link}")
+                    pass
+                time.sleep(1.5)
+                divs = driver.find_elements(By.TAG_NAME, 'div')
+                div_texts = [d.text for d in divs if d.text and len(d.text) > 500]
+                if div_texts:
+                    full_description = sorted(div_texts, key=len, reverse=True)[0]
+                else:
+                    # Fallback: gesamter Seiten-Text
+                    full_description = driver.find_element(By.TAG_NAME, 'body').text
+                driver.switch_to.window(main_window)
+            except Exception as e:
+                print(f"Fehler beim Laden der Detailseite: {e}")
+                full_description = ''
+                driver.switch_to.window(main_window)
 
             jobs_data.append({
                 'title': title,
                 'company': company,
                 'location': location,
-                'description': description,
+                'description': full_description,
                 'link': job_link
             })
+            print(jobs_data[-1])
+        # Close the detail window and return to main
+        driver.switch_to.window(detail_window)
+        driver.close()
+        driver.switch_to.window(main_window)
     driver.quit()
     return pd.DataFrame(jobs_data)
 
@@ -255,21 +284,37 @@ def construct_file_path(folder, filename):
     # Return the full path ready for use
     return file_path
 
-def run_streamlit_dashboard(filtered_jobs_df):
+def run_streamlit_dashboard(jobs_df):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
-    st.write(f"{len(filtered_jobs_df)} jobs found.")
-    filtered_jobs_df = filtered_jobs_df.reset_index(drop=True)
-    filtered_jobs_df['Select'] = False
+
+    filtered_jobs_path = os.path.join(os.path.dirname(__file__), "filtered_jobs_df.pkl")
+    filtered_jobs_df = None
+    if os.path.exists(filtered_jobs_path):
+        filtered_jobs_df = pd.read_pickle(filtered_jobs_path)
+
+    # Category selector
+    options = ["All Jobs"]
+    if filtered_jobs_df is not None and not filtered_jobs_df.empty:
+        options.insert(0, "Filtered Jobs")
+    selected_category = st.radio("Select job category to display:", options, index=0 if "Filtered Jobs" in options else 1)
+
+    if selected_category == "Filtered Jobs" and filtered_jobs_df is not None and not filtered_jobs_df.empty:
+        display_df = filtered_jobs_df.copy()
+        st.write(f"{len(display_df)} filtered jobs found.")
+    else:
+        display_df = jobs_df.copy()
+        st.write(f"{len(display_df)} jobs found.")
+
+    display_df = display_df.reset_index(drop=True)
+    display_df['Select'] = False
     # Sort by company name if the column exists
-    if 'company' in filtered_jobs_df.columns:
-        filtered_jobs_df = filtered_jobs_df.sort_values(by='company', na_position='last').reset_index(drop=True)
+    if 'company' in display_df.columns:
+        display_df = display_df.sort_values(by='company', na_position='last').reset_index(drop=True)
     # Show title, company, location, and link in the main table, and make link clickable
     columns = ['title', 'company', 'location', 'link', 'Select']
-    # Only include columns that exist in the DataFrame (for backward compatibility)
-    columns = [col for col in columns if col in filtered_jobs_df.columns]
-    table_df = filtered_jobs_df[columns].copy()
-    # Use LinkColumn for clickable links
+    columns = [col for col in columns if col in display_df.columns]
+    table_df = display_df[columns].copy()
     selected = st.data_editor(
         table_df,
         use_container_width=True,
@@ -286,7 +331,7 @@ def run_streamlit_dashboard(filtered_jobs_df):
             st.markdown(f"*Company:* {row['company']}")
         if 'location' in row:
             st.markdown(f"*Location:* {row['location']}")
-        st.markdown(f"[Link to job posting]({filtered_jobs_df.loc[idx, 'link']})")
+        st.markdown(f"[Link to job posting]({display_df.loc[idx, 'link']})")
         st.markdown("---")
 
 def filter_and_output_jobs(jobs_df, aligned_titles):
@@ -300,7 +345,10 @@ def filter_and_output_jobs(jobs_df, aligned_titles):
             print(f"Title not found: {title}")
     filtered_jobs_df = filtered_jobs_df.copy()
     filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-    run_streamlit_dashboard(filtered_jobs_df)
+    # Persist filtered jobs
+    filtered_jobs_path = os.path.join(os.path.dirname(__file__), "filtered_jobs_df.pkl")
+    filtered_jobs_df.to_pickle(filtered_jobs_path)
+    print(f"Filtered jobs saved to {filtered_jobs_path}")
 
 def main():
     indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
