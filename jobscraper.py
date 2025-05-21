@@ -23,6 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from gpt_filter import filter_jobs_by_interest
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+import sqlite3
 
 
 def initialize_driver():
@@ -98,15 +99,22 @@ def load_config(config_file="config.json"):
         print("Error parsing the configuration file.")
         return {}
 
-def load_existing_jobs(filename):
-    """Load existing jobs from pickle file if it exists."""
-    if os.path.exists(filename):
-        try:
-            return pd.read_pickle(filename)
-        except Exception as e:
-            print(f"Error loading existing jobs: {e}")
+def load_existing_jobs(table_name, db_path="data/jobs.db"):
+    """Load existing jobs from a SQLite table if it exists."""
+    if not os.path.exists(db_path):
+        if table_name == "stepstone_jobs":
+            return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link'])
+        else:
             return pd.DataFrame(columns=['title', 'description', 'link'])
-    return pd.DataFrame(columns=['title', 'description', 'link'])
+    with sqlite3.connect(db_path) as conn:
+        try:
+            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+        except Exception as e:
+            print(f"Error loading existing jobs from {table_name}: {e}")
+            if table_name == "stepstone_jobs":
+                return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link'])
+            else:
+                return pd.DataFrame(columns=['title', 'description', 'link'])
 
 def get_unique_jobs(existing_df, new_df):
     """Compare existing and new jobs, return only unique new jobs."""
@@ -284,15 +292,17 @@ def construct_file_path(folder, filename):
     # Return the full path ready for use
     return file_path
 
-def run_streamlit_dashboard(jobs_df):
+def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
 
-    filtered_jobs_path = os.path.join(os.path.dirname(__file__), "filtered_jobs_df.pkl")
     filtered_jobs_df = None
-    if os.path.exists(filtered_jobs_path):
-        filtered_jobs_df = pd.read_pickle(filtered_jobs_path)
-
+    if os.path.exists(db_path):
+        with sqlite3.connect(db_path) as conn:
+            try:
+                filtered_jobs_df = pd.read_sql("SELECT * FROM filtered_jobs", conn)
+            except Exception:
+                filtered_jobs_df = None
     # Category selector
     options = ["All Jobs"]
     if filtered_jobs_df is not None and not filtered_jobs_df.empty:
@@ -303,6 +313,10 @@ def run_streamlit_dashboard(jobs_df):
         display_df = filtered_jobs_df.copy()
         st.write(f"{len(display_df)} filtered jobs found.")
     else:
+        if jobs_df is None:
+            # Default to stepstone_jobs table
+            with sqlite3.connect(db_path) as conn:
+                jobs_df = pd.read_sql("SELECT * FROM stepstone_jobs", conn)
         display_df = jobs_df.copy()
         st.write(f"{len(display_df)} jobs found.")
 
@@ -334,7 +348,7 @@ def run_streamlit_dashboard(jobs_df):
         st.markdown(f"[Link to job posting]({display_df.loc[idx, 'link']})")
         st.markdown("---")
 
-def filter_and_output_jobs(jobs_df, aligned_titles):
+def filter_and_output_jobs(jobs_df, aligned_titles, db_path="data/jobs.db"):
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
     aligned_titles_lower = [title.lower() for title in aligned_titles]
@@ -345,15 +359,42 @@ def filter_and_output_jobs(jobs_df, aligned_titles):
             print(f"Title not found: {title}")
     filtered_jobs_df = filtered_jobs_df.copy()
     filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-    # Persist filtered jobs
-    filtered_jobs_path = os.path.join(os.path.dirname(__file__), "filtered_jobs_df.pkl")
-    filtered_jobs_df.to_pickle(filtered_jobs_path)
-    print(f"Filtered jobs saved to {filtered_jobs_path}")
+    # Persist filtered jobs to SQLite
+    with sqlite3.connect(db_path) as conn:
+        filtered_jobs_df.to_sql("filtered_jobs", conn, if_exists="replace", index=False)
+    print(f"Filtered jobs saved to table 'filtered_jobs' in {db_path}")
+
+def get_experience_terms(level):
+    """
+    Convert experience level setting to include/exclude terms.
+    Returns a dict with terms to include and exclude.
+    """
+    experience_mapping = {
+        "junior": {
+            "include": ["junior","entry-level", "graduate", "trainee", "0-2 years", "0-1 years"],
+            "exclude": ["senior", "expert", "lead", "staff", "principal", "architect", "manager", "director", 
+                      "several years of work experience"]
+        },
+        "mid": {
+            "include": ["intermediate", "mid-level", "mid level", "associate", "2-4 years", "3-5 years"],
+            "exclude": ["senior", "expert", "principal", "lead", "junior", "entry level", "entry-level", 
+                      "graduate", "trainee", "8+ years", "10+ years"]
+        },
+        "senior": {
+            "include": ["senior", "expert", "lead", "staff", "architect", "5+ years", "7+ years"],
+            "exclude": ["junior", "entry level", "entry-level", "graduate", "trainee", "0-2 years", "internship"]
+        },
+        "any": {
+            "include": [],
+            "exclude": []
+        }
+    }
+    
+    # Default to "any" if the specified level is not found
+    return experience_mapping.get(level.lower(), experience_mapping["any"])
 
 def main():
-    indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
-    stepstone_filename = construct_file_path("data", "stepstone_jobs_df.pkl")
-
+    db_path = "data/jobs.db"
     parser = argparse.ArgumentParser(description="AI Job scraper script")
     parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')  # Currently disabled
     parser.add_argument('--stepstone', action='store_true', help='Scrape jobs from StepStone')
@@ -366,63 +407,46 @@ def main():
     stepstone_url = config.get("stepstone_url", "")
     indeed_url = config.get("indeed_url", "")
     user_interests = config.get("user_interests", [])
-    jobs_to_avoid = config.get("jobs_to_avoid", [])
+    experience_level = config.get("experience_level", "any")
+    custom_exclude_terms = config.get("custom_exclude_terms", [])
     homeoffice_required = config.get("homeoffice_required", False)
+    
+    # Get experience-based terms
+    experience_terms = get_experience_terms(experience_level)
+    
+    # Combine custom exclude terms with experience-based exclude terms
+    jobs_to_avoid = experience_terms["exclude"] + custom_exclude_terms
+    
+    # Include terms will be used to refine job filtering
+    jobs_to_include = experience_terms["include"]
 
-    # Move dashboard logic to the top
     if args.dashboard:
-        files = [
-            (f, os.path.getmtime(f)) for f in [indeed_filename, stepstone_filename] if os.path.exists(f)
-        ]
-        if not files:
-            print("No job file found. Please run scraping/filtering first.")
-            return
-        latest_file = max(files, key=lambda x: x[1])[0]
-        print(f"Loading jobs from {latest_file}")
-        jobs_df = pd.read_pickle(latest_file)
-        run_streamlit_dashboard(jobs_df)
+        run_streamlit_dashboard(db_path=db_path)
         return
 
-    # if args.indeed:
-    #     # Load existing jobs
-    #     existing_jobs_df = load_existing_jobs(indeed_filename)
-    #     # Scrape new jobs
-    #     new_jobs_df = scrape_jobs('indeed', indeed_url)
-    #     # Get only unique new jobs
-    #     unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
-    #     # Combine existing and new unique jobs
-    #     combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
-    #     # Save combined jobs
-    #     combined_jobs_df.to_pickle(indeed_filename)
-    #     print(f"Added {len(unique_new_jobs)} new jobs to Indeed database. Total jobs: {len(combined_jobs_df)}")
-    #     jobs_df = combined_jobs_df
-    #     # Indeed scraping is currently disabled due to Cloudflare protection.
-    #     # Only StepStone scraping is supported at this time.
-    #     return
-
-    elif args.stepstone:
+    if args.stepstone:
         # Load existing jobs
-        existing_jobs_df = load_existing_jobs(stepstone_filename)
+        existing_jobs_df = load_existing_jobs("stepstone_jobs", db_path)
         # Scrape new jobs
         new_jobs_df = scrape_jobs('stepstone', stepstone_url)
         # Get only unique new jobs
         unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
         # Combine existing and new unique jobs
         combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
-        # Save combined jobs
-        combined_jobs_df.to_pickle(stepstone_filename)
+        # Save combined jobs to SQLite
+        with sqlite3.connect(db_path) as conn:
+            combined_jobs_df.to_sql("stepstone_jobs", conn, if_exists="replace", index=False)
         print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
         jobs_df = combined_jobs_df
     else:
         # Default to StepStone if no argument is given
-        print("Defaulting to StepStone job file.")
-        jobs_df = pd.read_pickle(stepstone_filename)
+        jobs_df = load_existing_jobs("stepstone_jobs", db_path)
 
     if args.filter:
         jobs_list = jobs_df[['title', 'description']].to_dict(orient='records')
-        filtered_titles = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required)
+        filtered_titles = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level)
         print(f"Processing of jobs complete. Keeping {len(filtered_titles)} jobs.")
-        filter_and_output_jobs(jobs_df, filtered_titles)
+        filter_and_output_jobs(jobs_df, filtered_titles, db_path)
     else:
         print("Missing arguments.")
         print("""

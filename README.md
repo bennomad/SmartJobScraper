@@ -61,3 +61,50 @@ After the scraping and filtering process completes, the results will be compiled
 ## General Information and Disclaimer
 
 This project is intended for personal use and educational purposes. Scraping websites can be against their terms of service. Please use this tool responsibly and ethically, respecting the websites' terms and conditions. The developer assumes no responsibility for any misuse of this software or any violations of terms of service.
+
+## Configuration
+
+Edit the `config.json` file to customize your job search:
+
+```json
+{
+    "openai_api_key": "your-api-key",
+    
+    "stepstone_url": "https://www.stepstone.de/jobs/your-search-query",
+    "indeed_url": "https://de.indeed.com/jobs?q=YourQuery",
+  
+    "user_interests": ["devops", "docker", "gitlab"],
+    "experience_level": "junior",
+    "custom_exclude_terms": ["educational training"],
+    "homeoffice_required": true
+}
+```
+
+### Configuration Options
+
+- **openai_api_key**: Your OpenAI API key for filtering jobs
+- **stepstone_url**: URL to scrape from Stepstone
+- **indeed_url**: URL to scrape from Indeed
+- **user_interests**: List of technical skills or areas you're interested in
+- **experience_level**: Your target experience level, options:
+  - `junior`: Targets entry-level positions, avoids senior roles
+  - `mid`: Targets mid-level positions
+  - `senior`: Targets senior positions, avoids junior roles
+  - `any`: No filtering by experience level
+- **custom_exclude_terms**: Additional terms to exclude from job listings
+- **homeoffice_required**: If true, only shows remote positions
+
+## Usage
+
+Run the job scraper with:
+
+```
+# Scrape from StepStone
+python jobscraper.py --stepstone
+
+# Filter jobs based on configuration
+python jobscraper.py --filter
+
+# View jobs in the dashboard
+python jobscraper.py --dashboard
+```
