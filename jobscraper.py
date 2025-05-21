@@ -130,13 +130,34 @@ def get_unique_jobs(existing_df, new_df):
     print(f"Found {len(unique_new_jobs)} new unique jobs out of {len(new_df)} total jobs")
     return unique_new_jobs
 
-def scrape_jobs_from_stepstone(url, pages=1):
+def ensure_stepstone_table(db_path="data/jobs.db"):
+    """Ensure the stepstone_jobs table exists with a unique constraint on link."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS stepstone_jobs (
+                title TEXT,
+                company TEXT,
+                location TEXT,
+                description TEXT,
+                link TEXT UNIQUE
+            )
+        ''')
+        conn.commit()
+
+def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Initializing web driver...")
     driver = initialize_driver()
     print("Opening URL...")
     driver.get(url)
     print("Handling cookie consent...")
     handle_cookies(driver)
+
+    ensure_stepstone_table(db_path)
+    # Load existing links from DB
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT title, company FROM stepstone_jobs")
+        existing_title_company = set((row[0], row[1]) for row in cur.fetchall())
 
     # Extract domain from the URL for relative links
     parsed_url = urlparse(url)
@@ -145,84 +166,94 @@ def scrape_jobs_from_stepstone(url, pages=1):
     query_dict = parse_qs(parsed_url.query)
 
     jobs_data = []
-    for page in tqdm(range(1, pages + 1)):
-        # Set the 'page' parameter in the query string
-        query_dict['page'] = [str(page)]
-        new_query = urlencode(query_dict, doseq=True)
-        new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
-        driver.get(new_url)
-        print("Navigated to:", driver.current_url)
-        time.sleep(2)
-        job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
-        if not job_cards:
-            print(f"No job cards found on page {page}. Stopping pagination.")
-            break
-        print("Processing job cards...")
-        # Open a new window for detail scraping
-        driver.execute_script("window.open('');")
-        detail_window = driver.window_handles[-1]
-        main_window = driver.current_window_handle
-        for job in tqdm(job_cards):
-            title = job.find_element(By.XPATH, './/h2').text
-            link_el = job.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
-            job_link = link_el.get_attribute('href')
-            if job_link.startswith('/'):
-                job_link = domain + job_link
-
-            # NEW: company name
-            try:
-                company = job.find_element(
-                    By.XPATH, './/span[@data-at="job-item-company-name"]'
-                ).text.strip()
-            except Exception:
-                company = ''
-
-            # NEW: location string (can be several cities separated by commas)
-            try:
-                location = job.find_element(
-                    By.XPATH, './/span[@data-at="job-item-location"]'
-                ).text.strip()
-            except Exception:
-                location = ''
-
-            # Vollständige Beschreibung von der Detailseite holen
-            full_description = ''
-            try:
-                driver.switch_to.window(detail_window)
-                driver.get(job_link)
+    with sqlite3.connect(db_path) as conn:
+        for page in tqdm(range(1, pages + 1)):
+            query_dict['page'] = [str(page)]
+            new_query = urlencode(query_dict, doseq=True)
+            new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
+            driver.get(new_url)
+            print("Navigated to:", driver.current_url)
+            time.sleep(2)
+            job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
+            if not job_cards:
+                print(f"No job cards found on page {page}. Stopping pagination.")
+                break
+            # --- Print how many jobs on this page are not yet in DB (by title+company) ---
+            page_title_company = set()
+            for job in job_cards:
+                title = job.find_element(By.XPATH, './/h2').text
                 try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.TAG_NAME, 'article'))
-                    )
+                    company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
                 except Exception:
-                    print(f"Error loading detail page for {job_link}")
-                    pass
-                time.sleep(1.5)
-                divs = driver.find_elements(By.TAG_NAME, 'div')
-                div_texts = [d.text for d in divs if d.text and len(d.text) > 500]
-                if div_texts:
-                    full_description = sorted(div_texts, key=len, reverse=True)[0]
-                else:
-                    # Fallback: gesamter Seiten-Text
-                    full_description = driver.find_element(By.TAG_NAME, 'body').text
-                driver.switch_to.window(main_window)
-            except Exception as e:
-                print(f"Fehler beim Laden der Detailseite: {e}")
+                    company = ''
+                page_title_company.add((title, company))
+            new_jobs = [tc for tc in page_title_company if tc not in existing_title_company]
+            print(f"Page {page}: {len(new_jobs)} jobs (by title+company) are not yet in the DB and will be processed.")
+            print("Processing job cards...")
+            driver.execute_script("window.open('');")
+            detail_window = driver.window_handles[-1]
+            main_window = driver.current_window_handle
+            for job in tqdm(job_cards):
+                title = job.find_element(By.XPATH, './/h2').text
+                link_el = job.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
+                job_link = link_el.get_attribute('href')
+                if job_link.startswith('/'):
+                    job_link = domain + job_link
+                try:
+                    company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
+                except Exception:
+                    company = ''
+                # Skip if already in DB by (title, company)
+                if (title, company) in existing_title_company:
+                    continue
+                try:
+                    location = job.find_element(By.XPATH, './/span[@data-at="job-item-location"]').text.strip()
+                except Exception:
+                    location = ''
                 full_description = ''
-                driver.switch_to.window(main_window)
-
-            jobs_data.append({
-                'title': title,
-                'company': company,
-                'location': location,
-                'description': full_description,
-                'link': job_link
-            })
-            print(jobs_data[-1])
-        # Close the detail window and return to main
-        driver.switch_to.window(detail_window)
-        driver.close()
-        driver.switch_to.window(main_window)
+                try:
+                    driver.switch_to.window(detail_window)
+                    driver.get(job_link)
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.TAG_NAME, 'article'))
+                        )
+                    except Exception:
+                        print(f"Error loading detail page for {job_link}")
+                        pass
+                    time.sleep(1.5)
+                    divs = driver.find_elements(By.TAG_NAME, 'div')
+                    div_texts = [d.text for d in divs if d.text and len(d.text) > 500]
+                    if div_texts:
+                        full_description = sorted(div_texts, key=len, reverse=True)[0]
+                    else:
+                        full_description = driver.find_element(By.TAG_NAME, 'body').text
+                    driver.switch_to.window(main_window)
+                except Exception as e:
+                    print(f"Fehler beim Laden der Detailseite: {e}")
+                    full_description = ''
+                    driver.switch_to.window(main_window)
+                job_entry = {
+                    'title': title,
+                    'company': company,
+                    'location': location,
+                    'description': full_description,
+                    'link': job_link
+                }
+                jobs_data.append(job_entry)
+                # Write to DB immediately
+                try:
+                    conn.execute(
+                        "INSERT INTO stepstone_jobs (title, company, location, description, link) VALUES (?, ?, ?, ?, ?)",
+                        (title, company, location, full_description, job_link)
+                    )
+                    conn.commit()
+                    existing_title_company.add((title, company))
+                except Exception as e:
+                    print(f"DB insert error for {job_link}: {e}")
+            driver.switch_to.window(detail_window)
+            driver.close()
+            driver.switch_to.window(main_window)
     driver.quit()
     return pd.DataFrame(jobs_data)
 
@@ -296,22 +327,34 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
 
-    filtered_jobs_df = None
+    filtered_jobs_step2_df = None
+    filtered_jobs_step3_df = None
     if os.path.exists(db_path):
         with sqlite3.connect(db_path) as conn:
             try:
-                filtered_jobs_df = pd.read_sql("SELECT * FROM filtered_jobs", conn)
+                filtered_jobs_step2_df = pd.read_sql("SELECT * FROM filtered_jobs_step2", conn)
             except Exception:
-                filtered_jobs_df = None
+                filtered_jobs_step2_df = None
+            try:
+                filtered_jobs_step3_df = pd.read_sql("SELECT * FROM filtered_jobs_step3", conn)
+            except Exception:
+                filtered_jobs_step3_df = None
+    
     # Category selector
     options = ["All Jobs"]
-    if filtered_jobs_df is not None and not filtered_jobs_df.empty:
-        options.insert(0, "Filtered Jobs")
-    selected_category = st.radio("Select job category to display:", options, index=0 if "Filtered Jobs" in options else 1)
+    if filtered_jobs_step2_df is not None and not filtered_jobs_step2_df.empty:
+        options.append("Home Office Jobs (Step 2)")
+    if filtered_jobs_step3_df is not None and not filtered_jobs_step3_df.empty:
+        options.append("Interest Filtered Jobs (Step 3)")
+    
+    selected_category = st.radio("Select job category to display:", options, index=len(options)-1)
 
-    if selected_category == "Filtered Jobs" and filtered_jobs_df is not None and not filtered_jobs_df.empty:
-        display_df = filtered_jobs_df.copy()
-        st.write(f"{len(display_df)} filtered jobs found.")
+    if selected_category == "Interest Filtered Jobs (Step 3)" and filtered_jobs_step3_df is not None and not filtered_jobs_step3_df.empty:
+        display_df = filtered_jobs_step3_df.copy()
+        st.write(f"{len(display_df)} interest-filtered jobs found.")
+    elif selected_category == "Home Office Jobs (Step 2)" and filtered_jobs_step2_df is not None and not filtered_jobs_step2_df.empty:
+        display_df = filtered_jobs_step2_df.copy()
+        st.write(f"{len(display_df)} home-office jobs found.")
     else:
         if jobs_df is None:
             # Default to stepstone_jobs table
@@ -348,21 +391,47 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
         st.markdown(f"[Link to job posting]({display_df.loc[idx, 'link']})")
         st.markdown("---")
 
-def filter_and_output_jobs(jobs_df, aligned_titles, db_path="data/jobs.db"):
+def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
+    """
+    Filter and save job results for each filtering step
+    
+    filter_results: Tuple of (step1_titles, step2_titles, step3_titles) from the filter_jobs_by_interest function
+    """
+    step1_titles, step2_titles, step3_titles = filter_results
+    
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
-    aligned_titles_lower = [title.lower() for title in aligned_titles]
-    filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(aligned_titles_lower)]
-    found_titles_lower = set(filtered_jobs_df['title_lower'])
-    for title in aligned_titles_lower:
+    
+    # Process step 2 filtered jobs (home office filtered)
+    step2_titles_lower = [title.lower() for title in step2_titles]
+    filtered_jobs_step2_df = jobs_df[jobs_df['title_lower'].isin(step2_titles_lower)]
+    found_titles_lower = set(filtered_jobs_step2_df['title_lower'])
+    for title in step2_titles_lower:
         if title not in found_titles_lower:
-            print(f"Title not found: {title}")
-    filtered_jobs_df = filtered_jobs_df.copy()
-    filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
+            print(f"Step 2 - Title not found: {title}")
+    filtered_jobs_step2_df = filtered_jobs_step2_df.copy()
+    
+    # Process step 3 filtered jobs (interest filtered)
+    step3_titles_lower = [title.lower() for title in step3_titles]
+    filtered_jobs_step3_df = jobs_df[jobs_df['title_lower'].isin(step3_titles_lower)]
+    found_titles_lower = set(filtered_jobs_step3_df['title_lower'])
+    for title in step3_titles_lower:
+        if title not in found_titles_lower:
+            print(f"Step 3 - Title not found: {title}")
+    filtered_jobs_step3_df = filtered_jobs_step3_df.copy()
+    
+    # Remove the helper column
+    filtered_jobs_step2_df.drop('title_lower', axis=1, inplace=True)
+    filtered_jobs_step3_df.drop('title_lower', axis=1, inplace=True)
+    jobs_df.drop('title_lower', axis=1, inplace=True)
+    
     # Persist filtered jobs to SQLite
     with sqlite3.connect(db_path) as conn:
-        filtered_jobs_df.to_sql("filtered_jobs", conn, if_exists="replace", index=False)
-    print(f"Filtered jobs saved to table 'filtered_jobs' in {db_path}")
+        filtered_jobs_step2_df.to_sql("filtered_jobs_step2", conn, if_exists="replace", index=False)
+        filtered_jobs_step3_df.to_sql("filtered_jobs_step3", conn, if_exists="replace", index=False)
+    
+    print(f"Step 2 filtered jobs (homeoffice): {len(filtered_jobs_step2_df)} jobs saved to table 'filtered_jobs_step2'")
+    print(f"Step 3 filtered jobs (interests): {len(filtered_jobs_step3_df)} jobs saved to table 'filtered_jobs_step3'")
 
 def get_experience_terms(level):
     """
@@ -444,9 +513,12 @@ def main():
 
     if args.filter:
         jobs_list = jobs_df[['title', 'description']].to_dict(orient='records')
-        filtered_titles = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level)
-        print(f"Processing of jobs complete. Keeping {len(filtered_titles)} jobs.")
-        filter_and_output_jobs(jobs_df, filtered_titles, db_path)
+        filter_results = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level)
+        print(f"Processing of jobs complete:")
+        print(f"  - Step 1 (Basic filtering): {len(filter_results[0])} jobs")
+        print(f"  - Step 2 (Home office filtered): {len(filter_results[1])} jobs")
+        print(f"  - Step 3 (Interest filtered): {len(filter_results[2])} jobs")
+        filter_and_output_jobs(jobs_df, filter_results, db_path)
     else:
         print("Missing arguments.")
         print("""
