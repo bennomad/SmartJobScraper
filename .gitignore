@@ -6,3 +6,5 @@ config.json
 *.html
 filtered_jobs_df.pkl
 all_jobs_input.csv
+prompt_step1.txt
+prompt_step2.txt

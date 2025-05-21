@@ -4,22 +4,28 @@ from tqdm import tqdm
 import sys
 import pandas as pd
 
-def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False):
+def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False, jobs_to_include=None, experience_level=None):
     """
     jobs: list of dicts, each with 'title' and 'description'
     homeoffice_required: if True, only keep jobs that are very likely 100% home office/remote
+    jobs_to_include: list of terms that should be preferred in job filtering
+    experience_level: string, e.g. 'junior', 'mid', 'senior', 'any'
     """
-    # Dump all jobs to CSV before filtering
-    try:
-        pd.DataFrame(jobs)[['title', 'description']].to_csv('all_jobs_input.csv', index=False)
-        print(f"Dumped {len(jobs)} jobs to all_jobs_input.csv")
-    except Exception as e:
-        print(f"Failed to dump jobs to CSV: {e}")
+    if jobs_to_include is None:
+        jobs_to_include = []
 
+    # Manual filter: if experience_level is 'junior', drop all jobs with 'senior ' in the title
+    if experience_level and experience_level.lower() == 'junior':
+        before_count = len(jobs)
+        jobs = [job for job in jobs if 'senior ' not in job['title'].lower()]
+        after_count = len(jobs)
+        print(f"Manual filter: removed {before_count - after_count} jobs containing 'senior ' in the title for junior level.")
+        
+    
     client = OpenAI(api_key=openai_api_key)
 
     print("Total jobs:", len(jobs))
-    batch_size = 40  # Reduce batch size since descriptions are longer
+    batch_size = 40  
     batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
     print(f"Splitting the total jobs into {len(batches)} API requests.")
 
@@ -32,19 +38,34 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
     def get_numbered_job_entries_with_desc(jobs):
         return [f"[{i+1}] Title: {job['title']} || Description: {job['description']}" for i, job in enumerate(jobs)]
 
+    # Track if prompt has been dumped
+    prompt1_dumped = False
+    prompt2_dumped = False
+
     if homeoffice_required:
         # Step 1: Filter by title only, removing jobs to avoid
         print("Step 1: Filtering by job titles (removing jobs to avoid)...")
         title_batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
         filtered_jobs_step1 = []
-        for batch in tqdm(title_batches, desc="Title Filtering Progress"):
+        for batch_idx, batch in enumerate(tqdm(title_batches, desc="Title Filtering Progress")):
             job_entries = get_numbered_job_entries(batch)
             jobs_to_avoid_str = " , ".join(jobs_to_avoid)
+            include_terms_str = " , ".join(jobs_to_include) if jobs_to_include else ""
+            
+            include_instruction = ""
+            if jobs_to_include:
+                include_instruction = f" Give preference to jobs with these terms: {include_terms_str},"
+            
             prompt_message = (
-                f"Given the user's interests are in {', '.join(user_interests)}, and aiming to avoid positions such as {jobs_to_avoid_str}, "
+                f"Given the user's interests are in {', '.join(user_interests)},{include_instruction} and aiming to avoid positions such as {jobs_to_avoid_str}, "
                 f"review the following job titles, each with a unique number in brackets. Each entry is formatted as [number] Title: ...: {' '.join(job_entries)}. "
                 "Return only the numbers of the job titles that do NOT fall into the categories to avoid, separated by commas. Do not return anything else."
             )
+            # Dump first prompt message of step 1
+            if not prompt1_dumped:
+                with open('prompt_step1.txt', 'w', encoding='utf-8') as f:
+                    f.write(prompt_message)
+                prompt1_dumped = True
             try:
                 response = client.chat.completions.create(
                     model="gpt-4.1",
@@ -80,7 +101,7 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
         desc_batch_size = 10  # Smaller batch size for more accurate filtering
         desc_batches = [filtered_jobs_step1[i:i + desc_batch_size] for i in range(0, len(filtered_jobs_step1), desc_batch_size)]
         total_hallucinated_homeoffice = 0
-        for batch in tqdm(desc_batches, desc="Home Office Filtering Progress"):
+        for batch_idx, batch in enumerate(tqdm(desc_batches, desc="Home Office Filtering Progress")):
             job_entries = get_numbered_job_entries_with_desc(batch)
             prompt_message = (
                 f"Review the following job listings, each with a unique number in brackets. Each entry is formatted as [number] Title: ... || Description: ...: {' '.join(job_entries)}. "
@@ -88,6 +109,11 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
                 "Be strict: Use all clues from the title and description, including synonyms and phrases like 'remote', 'work from anywhere', 'fully distributed', 'home office', '100% remote', 'completely remote', 'work from home', etc. "
                 "Return only the numbers of the job titles, separated by commas. Do not return anything else."
             )
+            # Dump first prompt message of step 2
+            if not prompt2_dumped:
+                with open('prompt_step2.txt', 'w', encoding='utf-8') as f:
+                    f.write(prompt_message)
+                prompt2_dumped = True
             try:
                 response = client.chat.completions.create(
                     model="gpt-4.1",
@@ -117,17 +143,28 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
             print(f"Total hallucinated job numbers in home office filtering across all batches: {total_hallucinated_homeoffice}")
     else:
         print("Processing jobs (title + description)...")
-        for batch in tqdm(batches, desc="Filtering Progress"):
+        for batch_idx, batch in enumerate(tqdm(batches, desc="Filtering Progress")):
             job_entries = get_numbered_job_entries_with_desc(batch)
             interests_str = ", ".join(user_interests)
             jobs_to_avoid_str = " , ".join(jobs_to_avoid)
+            include_terms_str = " , ".join(jobs_to_include) if jobs_to_include else ""
+            
+            include_instruction = ""
+            if jobs_to_include:
+                include_instruction = f" Give strong preference to jobs matching these experience terms: {include_terms_str},"
+                
             homeoffice_instruction = "Return only the numbers of the job titles, separated by commas. Do not return anything else."
             prompt_message = (
-                f"Given the user's interests are in {interests_str}, and aiming to avoid positions such as {jobs_to_avoid_str}, "
+                f"Given the user's interests are in {interests_str},{include_instruction} and aiming to avoid positions such as {jobs_to_avoid_str}, "
                 f"carefully review the following job listings, each with a unique number in brackets. Each entry is formatted as [number] Title: ... || Description: ...: {' '.join(job_entries)}. "
                 "Please list, separated by commas, the numbers of the job titles that align with the user's interests and do not fall into the categories to avoid. "
                 f"{homeoffice_instruction}"
             )
+            # Dump first prompt message of step 1 for non-homeoffice mode
+            if not prompt1_dumped:
+                with open('prompt_step1.txt', 'w', encoding='utf-8') as f:
+                    f.write(prompt_message)
+                prompt1_dumped = True
             try:
                 response = client.chat.completions.create(
                     model="gpt-4.1",
