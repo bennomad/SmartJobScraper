@@ -26,6 +26,114 @@ from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import sqlite3
 
 
+def initialize_database(db_path="data/jobs.db"):
+    """
+    Centralized database initialization and schema management.
+    Ensures all tables exist with proper schemas and handles migrations.
+    This function should be called at the start of the script to ensure database integrity.
+    """
+    # Ensure the data directory exists
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Define all table schemas
+        table_schemas = {
+            'stepstone_jobs': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS stepstone_jobs (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            },
+            'filtered_jobs_step2': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS filtered_jobs_step2 (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            },
+            'filtered_jobs_step3': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS filtered_jobs_step3 (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            }
+        }
+        
+        # Create tables and ensure proper schema
+        for table_name, schema_info in table_schemas.items():
+            # Create table if it doesn't exist
+            cursor.execute(schema_info['create_sql'])
+            
+            # Check existing columns
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            existing_columns = [info[1] for info in cursor.fetchall()]
+            
+            # Add missing columns if any
+            for required_column in schema_info['required_columns']:
+                if required_column not in existing_columns:
+                    if required_column == 'deleted':
+                        print(f"Adding 'deleted' column to {table_name} table...")
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN deleted INTEGER DEFAULT 0")
+                    elif required_column == 'analyzed':
+                        print(f"Adding 'analyzed' column to {table_name} table...")
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN analyzed INTEGER DEFAULT 0")
+                    # Add other column types here as needed in the future
+        
+        conn.commit()
+        print(f"Database initialization complete. All tables verified at {db_path}")
+
+
+def get_jobs_from_db(table_name, db_path="data/jobs.db", include_deleted=False):
+    """
+    Centralized function to load jobs from database with consistent deleted filtering.
+    """
+    if not os.path.exists(db_path):
+        # Return empty DataFrame with proper columns based on table type
+        if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
+            return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
+        else:
+            return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
+    
+    with sqlite3.connect(db_path) as conn:
+        try:
+            if include_deleted:
+                return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+            else:
+                return pd.read_sql(f"SELECT * FROM {table_name} WHERE deleted = 0 OR deleted IS NULL", conn)
+        except Exception as e:
+            print(f"Error loading jobs from {table_name}: {e}")
+            # Return empty DataFrame with proper columns
+            if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
+                return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
+            else:
+                return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
+
+
 def initialize_driver():
     options = Options()
     options.add_argument('--headless')
@@ -101,20 +209,7 @@ def load_config(config_file="config.json"):
 
 def load_existing_jobs(table_name, db_path="data/jobs.db"):
     """Load existing jobs from a SQLite table if it exists."""
-    if not os.path.exists(db_path):
-        if table_name == "stepstone_jobs":
-            return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link'])
-        else:
-            return pd.DataFrame(columns=['title', 'description', 'link'])
-    with sqlite3.connect(db_path) as conn:
-        try:
-            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
-        except Exception as e:
-            print(f"Error loading existing jobs from {table_name}: {e}")
-            if table_name == "stepstone_jobs":
-                return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link'])
-            else:
-                return pd.DataFrame(columns=['title', 'description', 'link'])
+    return get_jobs_from_db(table_name, db_path, include_deleted=True)
 
 def get_unique_jobs(existing_df, new_df):
     """Compare existing and new jobs, return only unique new jobs."""
@@ -130,49 +225,6 @@ def get_unique_jobs(existing_df, new_df):
     print(f"Found {len(unique_new_jobs)} new unique jobs out of {len(new_df)} total jobs")
     return unique_new_jobs
 
-def ensure_stepstone_table(db_path="data/jobs.db"):
-    """Ensure the stepstone_jobs table exists with a unique constraint on link and deleted flag."""
-    with sqlite3.connect(db_path) as conn:
-        # First create the table if it doesn't exist
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS stepstone_jobs (
-                title TEXT,
-                company TEXT,
-                location TEXT,
-                description TEXT,
-                link TEXT UNIQUE,
-                deleted INTEGER DEFAULT 0
-            )
-        ''')
-        
-        # Check if deleted column exists, add it if not
-        try:
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(stepstone_jobs)")
-            columns = [info[1] for info in cursor.fetchall()]
-            
-            if 'deleted' not in columns:
-                print("Adding 'deleted' column to stepstone_jobs table...")
-                conn.execute("ALTER TABLE stepstone_jobs ADD COLUMN deleted INTEGER DEFAULT 0")
-            
-            # Also ensure filtered tables have the deleted column
-            for table in ["filtered_jobs_step2", "filtered_jobs_step3"]:
-                try:
-                    cursor.execute(f"PRAGMA table_info({table})")
-                    table_info = cursor.fetchall()
-                    if table_info:  # Table exists
-                        columns = [info[1] for info in table_info]
-                        if 'deleted' not in columns:
-                            print(f"Adding 'deleted' column to {table} table...")
-                            conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted INTEGER DEFAULT 0")
-                except Exception as e:
-                    # Table might not exist yet, which is fine
-                    pass
-        except Exception as e:
-            print(f"Error checking/adding deleted column: {e}")
-            
-        conn.commit()
-
 def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Initializing web driver...")
     driver = initialize_driver()
@@ -181,25 +233,23 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Handling cookie consent...")
     handle_cookies(driver)
 
-    ensure_stepstone_table(db_path)
-    # Load existing links from DB
+    # Load existing title+company pairs from DB to avoid duplicates
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT title, company FROM stepstone_jobs")
+        cur.execute("SELECT title, company FROM stepstone_jobs WHERE deleted = 0 OR deleted IS NULL")
         existing_title_company = set((row[0], row[1]) for row in cur.fetchall())
 
     # Extract domain from the URL for relative links
     parsed_url = urlparse(url)
     domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    base_path = parsed_url.path
-    query_dict = parse_qs(parsed_url.query)
 
     jobs_data = []
     with sqlite3.connect(db_path) as conn:
         for page in tqdm(range(1, pages + 1)):
+            query_dict = parse_qs(parsed_url.query)
             query_dict['page'] = [str(page)]
             new_query = urlencode(query_dict, doseq=True)
-            new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
+            new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', new_query, ''))
             driver.get(new_url)
             print("Navigated to:", driver.current_url)
             time.sleep(2)
@@ -356,81 +406,29 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
 
-    # First, ensure the deleted column exists in all tables
-    if os.path.exists(db_path):
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Check tables and add deleted column if needed
-            for table in ["stepstone_jobs", "filtered_jobs_step2", "filtered_jobs_step3"]:
-                try:
-                    cursor.execute(f"PRAGMA table_info({table})")
-                    columns = [info[1] for info in cursor.fetchall()]
-                    if columns and 'deleted' not in columns:
-                        print(f"Adding 'deleted' column to {table} table...")
-                        conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted INTEGER DEFAULT 0")
-                        conn.commit()
-                except Exception as e:
-                    # Table might not exist yet, which is fine
-                    pass
-
-    filtered_jobs_step2_df = None
-    filtered_jobs_step3_df = None
-    if os.path.exists(db_path):
-        with sqlite3.connect(db_path) as conn:
-            try:
-                # Check if deleted column exists in the table
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(filtered_jobs_step2)")
-                columns = [info[1] for info in cursor.fetchall()]
-                
-                if 'deleted' in columns:
-                    filtered_jobs_step2_df = pd.read_sql("SELECT * FROM filtered_jobs_step2 WHERE deleted = 0 OR deleted IS NULL", conn)
-                else:
-                    filtered_jobs_step2_df = pd.read_sql("SELECT * FROM filtered_jobs_step2", conn)
-            except Exception:
-                filtered_jobs_step2_df = None
-                
-            try:
-                # Check if deleted column exists in the table
-                cursor.execute("PRAGMA table_info(filtered_jobs_step3)")
-                columns = [info[1] for info in cursor.fetchall()]
-                
-                if 'deleted' in columns:
-                    filtered_jobs_step3_df = pd.read_sql("SELECT * FROM filtered_jobs_step3 WHERE deleted = 0 OR deleted IS NULL", conn)
-                else:
-                    filtered_jobs_step3_df = pd.read_sql("SELECT * FROM filtered_jobs_step3", conn)
-            except Exception:
-                filtered_jobs_step3_df = None
+    # Load filtered job data using centralized function
+    filtered_jobs_step2_df = get_jobs_from_db("filtered_jobs_step2", db_path)
+    filtered_jobs_step3_df = get_jobs_from_db("filtered_jobs_step3", db_path)
     
     # Category selector
     options = ["All Jobs"]
-    if filtered_jobs_step2_df is not None and not filtered_jobs_step2_df.empty:
+    if not filtered_jobs_step2_df.empty:
         options.append("Home Office Jobs (Step 2)")
-    if filtered_jobs_step3_df is not None and not filtered_jobs_step3_df.empty:
+    if not filtered_jobs_step3_df.empty:
         options.append("Interest Filtered Jobs (Step 3)")
     
     selected_category = st.radio("Select job category to display:", options, index=len(options)-1)
 
-    if selected_category == "Interest Filtered Jobs (Step 3)" and filtered_jobs_step3_df is not None and not filtered_jobs_step3_df.empty:
+    if selected_category == "Interest Filtered Jobs (Step 3)" and not filtered_jobs_step3_df.empty:
         display_df = filtered_jobs_step3_df.copy()
         st.write(f"{len(display_df)} interest-filtered jobs found.")
-    elif selected_category == "Home Office Jobs (Step 2)" and filtered_jobs_step2_df is not None and not filtered_jobs_step2_df.empty:
+    elif selected_category == "Home Office Jobs (Step 2)" and not filtered_jobs_step2_df.empty:
         display_df = filtered_jobs_step2_df.copy()
         st.write(f"{len(display_df)} home-office jobs found.")
     else:
         if jobs_df is None:
-            # Default to stepstone_jobs table
-            with sqlite3.connect(db_path) as conn:
-                # Check if deleted column exists in the table
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(stepstone_jobs)")
-                columns = [info[1] for info in cursor.fetchall()]
-                
-                if 'deleted' in columns:
-                    jobs_df = pd.read_sql("SELECT * FROM stepstone_jobs WHERE deleted = 0 OR deleted IS NULL", conn)
-                else:
-                    jobs_df = pd.read_sql("SELECT * FROM stepstone_jobs", conn)
+            # Default to stepstone_jobs table using centralized function
+            jobs_df = get_jobs_from_db("stepstone_jobs", db_path)
         display_df = jobs_df.copy()
         st.write(f"{len(display_df)} jobs found.")
 
@@ -467,19 +465,10 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
             for idx in selected_indices:
                 job_link = display_df.loc[idx, 'link']
                 
-                # Update the main stepstone_jobs table if it has the deleted column
-                cursor.execute("PRAGMA table_info(stepstone_jobs)")
-                columns = [info[1] for info in cursor.fetchall()]
-                if 'deleted' in columns:
-                    cursor.execute("UPDATE stepstone_jobs SET deleted = 1 WHERE link = ?", (job_link,))
-                
-                # Update filtered tables if they exist and have the deleted column
-                for table in ["filtered_jobs_step2", "filtered_jobs_step3"]:
+                # Update all relevant tables
+                for table in ["stepstone_jobs", "filtered_jobs_step2", "filtered_jobs_step3"]:
                     try:
-                        cursor.execute(f"PRAGMA table_info({table})")
-                        columns = [info[1] for info in cursor.fetchall()]
-                        if 'deleted' in columns:
-                            cursor.execute(f"UPDATE {table} SET deleted = 1 WHERE link = ?", (job_link,))
+                        cursor.execute(f"UPDATE {table} SET deleted = 1 WHERE link = ?", (job_link,))
                     except Exception:
                         # Table might not exist
                         pass
@@ -533,11 +522,6 @@ def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
     filtered_jobs_step3_df.drop('title_lower', axis=1, inplace=True)
     jobs_df.drop('title_lower', axis=1, inplace=True)
     
-    # Make sure deleted flag exists in all DataFrames
-    for df in [filtered_jobs_step2_df, filtered_jobs_step3_df]:
-        if 'deleted' not in df.columns:
-            df['deleted'] = 0
-    
     # Persist filtered jobs to SQLite
     with sqlite3.connect(db_path) as conn:
         filtered_jobs_step2_df.to_sql("filtered_jobs_step2", conn, if_exists="replace", index=False)
@@ -577,6 +561,10 @@ def get_experience_terms(level):
 
 def main():
     db_path = "data/jobs.db"
+    
+    # Initialize database schema and ensure integrity
+    initialize_database(db_path)
+    
     parser = argparse.ArgumentParser(description="AI Job scraper script")
     parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')  # Currently disabled
     parser.add_argument('--stepstone', action='store_true', help='Scrape jobs from StepStone')

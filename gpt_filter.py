@@ -6,7 +6,7 @@ import pandas as pd
 
 def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False, jobs_to_include=None, experience_level=None):
     """
-    jobs: list of dicts, each with 'title' and 'description'
+    jobs: list of dicts, each with 'title' and 'description' and optionally 'analyzed'
     homeoffice_required: if True, only keep jobs that are very likely 100% home office/remote
     jobs_to_include: list of terms that should be preferred in job filtering
     experience_level: string, e.g. 'junior', 'mid', 'senior', 'any'
@@ -15,9 +15,13 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
     1. step1_filtered_titles - after basic filtering
     2. step2_filtered_titles - after homeoffice filtering (if required)
     3. step3_filtered_titles - after user interests filtering
+    Also, all jobs that are processed (not skipped) will have 'analyzed' set to 1.
     """
     if jobs_to_include is None:
         jobs_to_include = []
+
+    # Skip jobs that have already been analyzed
+    jobs = [job for job in jobs if not job.get('analyzed', 0)]
 
     # Manual filter: if experience_level is 'junior', drop all jobs with 'senior ' in the title
     if experience_level and experience_level.lower() == 'junior':
@@ -26,7 +30,6 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
         after_count = len(jobs)
         print(f"Manual filter: removed {before_count - after_count} jobs containing 'senior ' in the title for junior level.")
         
-    
     client = OpenAI(api_key=openai_api_key)
 
     print("Total jobs:", len(jobs))
@@ -37,7 +40,6 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
     step1_filtered_titles = []
     step2_filtered_titles = []
     step3_filtered_titles = []
-    total_hallucinated_titles = 0
 
     def get_numbered_job_entries(jobs):
         return [f"[{i+1}] Title: {job['title']}" for i, job in enumerate(jobs)]
@@ -93,17 +95,12 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
             print(f"GPT returned {len(filtered_indices)} jobs for this batch")
             # Map back to jobs with these indices
             for idx in filtered_indices:
-                filtered_jobs_step1.append(batch[idx])
-            # Hallucination: numbers out of range or not found
-            hallucinated = len(filtered_numbers) - len(filtered_indices)
-            if hallucinated > 0:
-                print(f"Total hallucinated job numbers in batch: {hallucinated}")
-                total_hallucinated_titles += hallucinated
+                job = batch[idx]
+                job['analyzed'] = 1  # Tag as analyzed
+                filtered_jobs_step1.append(job)
         except Exception as e:
             print(f"An error occurred while processing a title batch: {e}")
             sys.exit()
-    if total_hallucinated_titles > 0:
-        print(f"Total hallucinated job numbers across all batches: {total_hallucinated_titles}")
 
     step1_filtered_titles = [job['title'].strip().rstrip('.') for job in filtered_jobs_step1 if job['title'].strip()]
     print(f"Step 1 results: {len(step1_filtered_titles)} jobs passed the title filtering.")
@@ -114,14 +111,15 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
         print("Step 2: Filtering by description for 100% home office...")
         desc_batch_size = 10  # Smaller batch size for more accurate filtering
         desc_batches = [filtered_jobs_step1[i:i + desc_batch_size] for i in range(0, len(filtered_jobs_step1), desc_batch_size)]
-        total_hallucinated_homeoffice = 0
         filtered_jobs_step2 = []
         for batch_idx, batch in enumerate(tqdm(desc_batches, desc="Home Office Filtering Progress")):
             job_entries = get_numbered_job_entries_with_desc(batch)
             # Step 2: Home office filtering prompt
             prompt_message = (
                 "Your task is to identify job listings that are VERY LIKELY to be 100% remote/home office positions. "
-                "Be strict: Look for clear indicators like 'remote', 'work from anywhere', 'fully distributed', 'home office', '100% remote', 'completely remote', 'work from home', etc. "
+                "Be extremely strict: Only select jobs where it is clearly stated that the position is fully remote, 100% home office, or similar. "
+                "Exclude jobs where remote or home office is not mentioned, or where only vague or partial options are given (such as 'homeoffice möglichkeit', 'option for home office', '1 day a week home office', or similar phrases). "
+                "Look for clear indicators like 'remote', 'work from anywhere', 'fully distributed', 'home office', '100% remote', 'completely remote', 'work from home', etc. "
                 "Review the following job listings, each with a unique number in brackets. "
                 f"Each entry is formatted as [number] Title: ... || Description: ...: {' '.join(job_entries)}. "
                 "Return only the numbers of the job titles, separated by commas. Do not return anything else."
@@ -138,6 +136,8 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
                         {"role": "system",
                          "content": (
                             "You are a helpful assistant. Your task is to identify job titles that are VERY LIKELY 100% home office/remote. "
+                            "Be extremely strict: Only select jobs where it is clearly stated that the position is fully remote, 100% home office, or similar. "
+                            "Exclude jobs where remote or home office is not mentioned, or where only vague or partial options are given (such as 'homeoffice möglichkeit', 'option for home office', '1 day a week home office', or similar phrases). "
                             "Be strict in your evaluation of remote work indicators. "
                             "Each job listing is presented as a numbered entry in the format [number] Title: ... || Description: ... "
                             "Return only the numbers of the job titles, separated by commas. Do not return anything else."
@@ -147,18 +147,13 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
                 )
                 filtered_numbers = [n.strip() for n in response.choices[0].message.content.strip().split(',') if n.strip().isdigit()]
                 filtered_indices = [int(n)-1 for n in filtered_numbers if n.isdigit() and 0 < int(n) <= len(batch)]
-                # Hallucination: numbers out of range or not found
-                hallucinated = len(filtered_numbers) - len(filtered_indices)
-                if hallucinated > 0:
-                    print(f"Home office filtering: Total hallucinated job numbers in batch: {hallucinated}")
-                    total_hallucinated_homeoffice += hallucinated
                 for idx in filtered_indices:
-                    filtered_jobs_step2.append(batch[idx])
+                    job = batch[idx]
+                    job['analyzed'] = 1  # Tag as analyzed
+                    filtered_jobs_step2.append(job)
             except Exception as e:
                 print(f"An error occurred while processing a description batch: {e}")
                 sys.exit()
-        if total_hallucinated_homeoffice > 0:
-            print(f"Total hallucinated job numbers in home office filtering across all batches: {total_hallucinated_homeoffice}")
         
         step2_filtered_titles = [job['title'].strip().rstrip('.') for job in filtered_jobs_step2 if job['title'].strip()]
         print(f"Step 2 results: {len(step2_filtered_titles)} jobs passed the home office filtering.")
@@ -212,7 +207,9 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
             filtered_numbers = [n.strip() for n in response.choices[0].message.content.strip().split(',') if n.strip().isdigit()]
             filtered_indices = [int(n)-1 for n in filtered_numbers if n.isdigit() and 0 < int(n) <= len(batch)]
             for idx in filtered_indices:
-                filtered_jobs_step3.append(batch[idx])
+                job = batch[idx]
+                job['analyzed'] = 1  # Tag as analyzed
+                filtered_jobs_step3.append(job)
         except Exception as e:
             print(f"An error occurred while processing an interest batch: {e}")
             sys.exit()
