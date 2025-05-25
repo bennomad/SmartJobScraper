@@ -115,15 +115,15 @@ The Streamlit dashboard provides:
 
 ## Data Storage
 
-Jobs are stored in a SQLite database (`data/jobs.db`) with the following tables:
-- `stepstone_jobs`: All scraped jobs from Stepstone
-- `filtered_jobs_step2`: Jobs that passed home office filtering
-- `filtered_jobs_step3`: Jobs that passed interest-based filtering
+Jobs are stored in a SQLite database (`data/jobs.db`) with a normalized schema:
+- `jobs`: Single source of truth for all job data with unique constraint on (title, company)
+- `job_filters`: Filter results linked to jobs via foreign keys
 
 The database automatically handles:
-- Duplicate detection based on job links
+- Duplicate detection based on (title, company) combination
 - Schema migrations and updates
 - Soft deletion (jobs marked as deleted are hidden but preserved)
+- Extensible filter types without schema changes
 
 ## AI Filtering Process
 
