@@ -1,110 +1,156 @@
 # Smart Job Scraper
 
-Smart Job Scraper is a powerful tool designed to streamline the job search process. By leveraging advanced web scraping techniques and AI-powered filtering, this script fetches job listings from Stepstone (and previously Indeed), then filters them based on user-defined interests and criteria.
+Smart Job Scraper is a powerful tool designed to streamline the job search process. By leveraging advanced web scraping techniques and AI-powered filtering, this script fetches job listings from Stepstone, stores them in a SQLite database, and filters them based on user-defined interests and criteria.
 
 > **Note:** Scraping from Indeed is currently **not working** as Indeed has implemented a Cloudflare check that blocks automated access. Only Stepstone scraping is supported at this time.
+
+## Features
+
+- **Web Scraping**: Automated job scraping from Stepstone with duplicate detection
+- **SQLite Database**: Persistent storage of job data with automatic schema management
+- **AI-Powered Filtering**: Three-step filtering process using OpenAI GPT models:
+  1. Basic filtering to remove unwanted job categories
+  2. Home office/remote work filtering (optional)
+  3. Interest-based filtering aligned with your skills and preferences
+- **Interactive Dashboard**: Streamlit-based web interface for browsing and managing jobs
+- **Experience Level Targeting**: Automatic filtering based on experience level (junior, mid, senior)
+- **Job Management**: Mark jobs as deleted to hide them from future views
 
 ## Installation
 
 This project requires Python 3.6+ and several third-party libraries. You can install the necessary dependencies using pip:
 
 ```bash
-pip install openai pandas selenium tqdm webdriver-manager
+pip install openai pandas selenium tqdm webdriver-manager streamlit
 ```
 
-- **Chrome Browser**: Ensure you have the latest version of Chrome installed on your computer as this script uses Selenium with ChromeDriver for web scraping. Chrome will run in non-headless mode, meaning a browser window will visibly open and navigate through the sites during the scraping process. This approach is used as headless mode can sometimes cause issues with site interactions. 
-  
+Alternatively, install from the requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+**Additional Requirements:**
+- **Chrome Browser**: Ensure you have the latest version of Chrome installed as this script uses Selenium with ChromeDriver for web scraping. The browser runs in headless mode for automated scraping.
+
 ## Getting Started
 
-### Step 1: Basic Setup
+### Step 1: Configuration Setup
 
-1. **Scraping URLs Setup**: Manually navigate to Stepstone (and previously Indeed) websites in your browser. Apply basic filters according to your preferences and copy the URLs into the `config.json` file under `stepstone_url` (and `indeed_url` if/when supported again).
-
-### Step 2: OpenAI API Setup
-
-1. **OpenAI Registration**: If you haven't already, register at [platform.openai.com](https://platform.openai.com/). Add credits to your account for API usage ($5 should suffice for extensive job searches).
-
-2. **Configuration**: Add your OpenAI API key and your specific job interests to the `config.json` file. Here is what your `config.json` might look like:
-
-    ```json
-    {
-      "openai_api_key": "your_secret_key_here",
-      "stepstone_url": "https://www.stepstone.de/...",
-      "indeed_url": "https://de.indeed.com/...",
-      "user_interests": ["IT", "Software Development"],
-      "jobs_to_avoid": ["senior", "expert", "internship", "educational training", "Data Analysis", "SAP"]
-    }
-    ```
-
-### Step 3: Running the Scraper
-
-- **Indeed Scraping**: To scrape jobs from Indeed, use the `--indeed` flag:
-
-    ```bash
-    python3 jobscraper.py --indeed
-    ```
-    > **Currently not working:** Indeed scraping is disabled due to Cloudflare protection. This feature will be restored if a workaround is found.
-
-- **Stepstone Scraping**: To scrape jobs from Stepstone, use the `--stepstone` flag:
-
-    ```bash
-    python3 jobscraper.py --stepstone
-    ```
-
-- **Filtering Jobs**: To filter all job results based on interests with AI-powered analysis, use the `--filter` flag:
-
-    ```bash
-    python3 jobscraper.py --filter
-    ```
-After the scraping and filtering process completes, the results will be compiled into an HTML file, which will automatically be opened in your default web browser for easy viewing.
-
-## General Information and Disclaimer
-
-This project is intended for personal use and educational purposes. Scraping websites can be against their terms of service. Please use this tool responsibly and ethically, respecting the websites' terms and conditions. The developer assumes no responsibility for any misuse of this software or any violations of terms of service.
-
-## Configuration
-
-Edit the `config.json` file to customize your job search:
+Create a `config.json` file in the project directory with your settings:
 
 ```json
 {
-    "openai_api_key": "your-api-key",
-    
+    "openai_api_key": "your-openai-api-key",
     "stepstone_url": "https://www.stepstone.de/jobs/your-search-query",
-    "indeed_url": "https://de.indeed.com/jobs?q=YourQuery",
-  
-    "user_interests": ["devops", "docker", "gitlab"],
+    "user_interests": ["devops", "docker", "gitlab", "python", "ansible"],
     "experience_level": "junior",
     "custom_exclude_terms": ["educational training"],
     "homeoffice_required": true
 }
 ```
 
-### Configuration Options
+### Step 2: OpenAI API Setup
 
-- **openai_api_key**: Your OpenAI API key for filtering jobs
-- **stepstone_url**: URL to scrape from Stepstone
-- **indeed_url**: URL to scrape from Indeed
-- **user_interests**: List of technical skills or areas you're interested in
-- **experience_level**: Your target experience level, options:
-  - `junior`: Targets entry-level positions, avoids senior roles
-  - `mid`: Targets mid-level positions
-  - `senior`: Targets senior positions, avoids junior roles
-  - `any`: No filtering by experience level
+1. **OpenAI Registration**: Register at [platform.openai.com](https://platform.openai.com/) and add credits to your account ($5 should suffice for extensive job searches).
+
+2. **Get API Key**: Generate an API key and add it to your `config.json` file.
+
+### Step 3: Stepstone URL Setup
+
+1. Navigate to [Stepstone](https://www.stepstone.de/) in your browser
+2. Apply your desired filters (location, job type, etc.)
+3. Copy the resulting URL and paste it into the `stepstone_url` field in your `config.json`
+
+## Configuration Options
+
+### Required Settings
+- **openai_api_key**: Your OpenAI API key for AI-powered job filtering
+- **stepstone_url**: URL from Stepstone with your search criteria applied
+
+### Optional Settings
+- **user_interests**: List of technical skills or areas you're interested in (e.g., ["python", "docker", "kubernetes"])
+- **experience_level**: Target experience level with automatic filtering:
+  - `"junior"`: Entry-level positions, excludes senior roles
+  - `"mid"`: Mid-level positions
+  - `"senior"`: Senior positions, excludes junior roles  
+  - `"any"`: No experience-based filtering (default)
 - **custom_exclude_terms**: Additional terms to exclude from job listings
-- **homeoffice_required**: If true, only shows remote positions
+- **homeoffice_required**: Set to `true` to only show remote/home office positions
 
 ## Usage
 
-Run the job scraper with:
+### Basic Workflow
 
-```
-# Scrape from StepStone
-python jobscraper.py --stepstone
+1. **Scrape Jobs**: Collect new job listings from Stepstone
+   ```bash
+   python jobscraper.py --stepstone
+   ```
 
-# Filter jobs based on configuration
-python jobscraper.py --filter
+2. **Filter Jobs**: Apply AI-powered filtering based on your interests
+   ```bash
+   python jobscraper.py --filter
+   ```
 
-# View jobs in the dashboard
-python jobscraper.py --dashboard
-```
+3. **View Dashboard**: Browse filtered jobs in an interactive web interface
+   ```bash
+   streamlit run jobscraper.py -- --dashboard
+   ```
+
+### Command Line Options
+
+- `--stepstone`: Scrape new jobs from Stepstone and add to database
+- `--filter`: Filter existing jobs using AI based on configuration
+- `--dashboard`: Launch interactive Streamlit dashboard
+- `--indeed`: *(Currently disabled)* Scrape from Indeed
+
+### Dashboard Features
+
+The Streamlit dashboard provides:
+- **Job Categories**: View all jobs, home office filtered jobs, or interest-filtered jobs
+- **Interactive Table**: Browse jobs with clickable links
+- **Job Management**: Select and mark jobs as deleted
+- **Detailed View**: Expand job details including company, location, and description
+- **Sorting**: Jobs are automatically sorted by company name
+
+## Data Storage
+
+Jobs are stored in a SQLite database (`data/jobs.db`) with the following tables:
+- `stepstone_jobs`: All scraped jobs from Stepstone
+- `filtered_jobs_step2`: Jobs that passed home office filtering
+- `filtered_jobs_step3`: Jobs that passed interest-based filtering
+
+The database automatically handles:
+- Duplicate detection based on job links
+- Schema migrations and updates
+- Soft deletion (jobs marked as deleted are hidden but preserved)
+
+## AI Filtering Process
+
+The filtering system uses a three-step approach:
+
+1. **Step 1 - Basic Filtering**: Removes jobs containing unwanted terms or categories
+2. **Step 2 - Home Office Filtering** *(optional)*: Identifies jobs that are clearly 100% remote/home office
+3. **Step 3 - Interest Filtering**: Matches jobs to your specified interests and skills
+
+Each step uses GPT-4 mini for intelligent analysis of job titles and descriptions.
+
+## Troubleshooting
+
+### Common Issues
+
+- **Chrome Driver Issues**: The script automatically downloads the appropriate ChromeDriver version
+- **API Rate Limits**: The filtering process uses batching to stay within OpenAI rate limits
+- **Database Errors**: The database schema is automatically initialized and migrated
+
+### Debug Information
+
+The script generates prompt files (`prompt_step1.txt`, `prompt_step2.txt`, `prompt_step3.txt`) showing the exact prompts sent to the AI for debugging filtering results.
+
+## Legal Disclaimer
+
+This project is intended for personal use and educational purposes. Web scraping may be against some websites' terms of service. Please use this tool responsibly and ethically, respecting websites' terms and conditions and rate limits. The developer assumes no responsibility for any misuse of this software or violations of terms of service.
+
+## Contributing
+
+Feel free to submit issues and enhancement requests. This project is designed to be easily extensible for additional job sites and filtering criteria.

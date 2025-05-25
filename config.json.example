@@ -1,10 +1,11 @@
 {
-  "openai_api_key": "secretkey",
+  "openai_api_key": "sk-proj-your-openai-api-key-here",
   
-  "stepstone_url": "https://www.stepstone.de/work/in-berlin?radius=30&action=facet_selected%3bage%3bage_7&ag=age_7",
-  "indeed_url": "https://de.indeed.com/jobs?q=&l=Berlin&fromage=14&sort=date",
+  "stepstone_url": "https://www.stepstone.de/jobs/software-developer?sort=2&action=facet_selected%3bage%3bage_7&ag=age_7&searchOrigin=jobad",
+  "indeed_url": "https://de.indeed.com/jobs?q=Software+Developer&l=Berlin&fromage=7&sort=date",
 
-  "user_interests": ["IT", "Software Development"],
-  "jobs_to_avoid": ["senior", "expert", "internship", "educational training", "Data Analysis", "SAP"],
+  "user_interests": ["python", "javascript", "react", "docker", "kubernetes"],
+  "experience_level": "mid",
+  "custom_exclude_terms": ["educational training", "internship"],
   "homeoffice_required": true  // If true, only jobs with 100% home office or equivalent remote flexibility will be considered
 }
