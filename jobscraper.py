@@ -355,9 +355,18 @@ def close_popup_if_present(driver):
         # If the popup doesn't appear or the close button is not found, just continue.
         pass
 
+@st.cache_resource
+def init_db_once(db_path):
+    """Initialize database only once per session"""
+    initialize_database(db_path)
+    return True
+
 def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
+
+    # Initialize database only once per session
+    init_db_once(db_path)
 
     # Load filtered job data using centralized function
     filtered_jobs_step2_df = get_jobs_from_db("step2_homeoffice", db_path)
@@ -418,7 +427,7 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
             for idx in selected_indices:
                 # Get job ID or use title+company for identification
                 if 'id' in display_df.columns:
-                    job_id = display_df.loc[idx, 'id']
+                    job_id = int(display_df.loc[idx, 'id'])
                     cursor.execute("UPDATE jobs SET deleted = 1 WHERE id = ?", (job_id,))
                 else:
                     # Fallback to title+company identification
@@ -469,7 +478,7 @@ def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
         # Update job_filters table for step 2
         for _, job in step2_jobs.iterrows():
             if 'id' in job:
-                job_id = job['id']
+                job_id = int(job['id'])  
             else:
                 # Find job_id by title+company
                 cursor.execute("SELECT id FROM jobs WHERE title = ? AND company = ?", (job['title'], job['company']))
@@ -495,7 +504,7 @@ def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
         # Update job_filters table for step 3
         for _, job in step3_jobs.iterrows():
             if 'id' in job:
-                job_id = job['id']
+                job_id = int(job['id'])  
             else:
                 # Find job_id by title+company
                 cursor.execute("SELECT id FROM jobs WHERE title = ? AND company = ?", (job['title'], job['company']))
@@ -547,15 +556,16 @@ def get_experience_terms(level):
 def main():
     db_path = "data/jobs.db"
     
-    # Initialize database schema and ensure integrity
-    initialize_database(db_path)
-    
     parser = argparse.ArgumentParser(description="AI Job scraper script")
     parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')  # Currently disabled
     parser.add_argument('--stepstone', action='store_true', help='Scrape jobs from StepStone')
     parser.add_argument('--filter', action='store_true', help='Filter job offers by interests')
     parser.add_argument('--dashboard', action='store_true', help='Show the dashboard for the latest job file')
     args = parser.parse_args()
+
+    # Initialize database schema for non-dashboard operations
+    if not args.dashboard:
+        initialize_database(db_path)
 
     config = load_config()
     openai_api_key = config.get("openai_api_key", "")

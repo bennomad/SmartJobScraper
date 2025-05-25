@@ -231,7 +231,7 @@ def mark_jobs_as_analyzed(jobs, db_path):
         for job in jobs:
             if 'id' in job:
                 # Use job ID if available
-                cursor.execute("UPDATE jobs SET analyzed = 1 WHERE id = ?", (job['id'],))
+                cursor.execute("UPDATE jobs SET analyzed = 1 WHERE id = ?", (int(job['id']),))
             else:
                 # Fallback to title+company identification
                 cursor.execute("UPDATE jobs SET analyzed = 1 WHERE title = ? AND company = ?", 
