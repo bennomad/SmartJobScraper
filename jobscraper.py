@@ -140,25 +140,6 @@ def initialize_driver():
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
-def load_decision_needed(last_decision_file, threshold_hours=4):
-    if os.path.exists(last_decision_file):
-        with open(last_decision_file, 'rb') as file:
-            last_decision_time = pickle.load(file)
-        return (datetime.now() - last_decision_time) > timedelta(hours=threshold_hours)
-    return True
-
-def save_decision_time(last_decision_file):
-    with open(last_decision_file, 'wb') as file:
-        pickle.dump(datetime.now(), file)
-
-
-def get_user_decision():
-    user_decision = input("Do you want to load the data? (yes/no): ").strip().lower()
-    if user_decision not in ["yes", "no"]:
-        print("Invalid input. Defaulting to load.")
-        return True
-    return user_decision == "yes"
-
 def scrape_jobs(platform, url, pages=30):
     if platform == 'indeed':
         return scrape_jobs_from_indeed(url, pages)
@@ -385,23 +366,6 @@ def close_popup_if_present(driver):
         # If the popup doesn't appear or the close button is not found, just continue.
         pass
 
-
-def construct_file_path(folder, filename):
-    # Get the directory of the current script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Construct the path to the specified folder relative to the script directory
-    folder_path = os.path.join(script_dir, folder)
-
-    # Make the folder if it doesn't exist
-    os.makedirs(folder_path, exist_ok=True)
-
-    # Construct the full path for the file
-    file_path = os.path.join(folder_path, filename)
-
-    # Return the full path ready for use
-    return file_path
-
 def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.set_page_config(page_title="Job Listings", layout="wide")
     st.title("Job Listings")
@@ -595,15 +559,10 @@ def main():
         return
 
     if args.stepstone:
-        # Load existing jobs
         existing_jobs_df = load_existing_jobs("stepstone_jobs", db_path)
-        # Scrape new jobs
         new_jobs_df = scrape_jobs('stepstone', stepstone_url)
-        # Get only unique new jobs
         unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
-        # Combine existing and new unique jobs
         combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
-        # Save combined jobs to SQLite
         with sqlite3.connect(db_path) as conn:
             combined_jobs_df.to_sql("stepstone_jobs", conn, if_exists="replace", index=False)
         print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
@@ -613,9 +572,8 @@ def main():
         jobs_df = load_existing_jobs("stepstone_jobs", db_path)
 
     if args.filter:
-        # Check if deleted column exists in the dataframe
         if 'deleted' in jobs_df.columns:
-            # Only filter jobs that are not deleted
+            # Only filter jobs that are not marked asdeleted
             jobs_with_filter = jobs_df[jobs_df['deleted'].fillna(0) == 0]
         else:
             # If deleted column doesn't exist, use all jobs
