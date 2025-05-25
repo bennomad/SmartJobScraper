@@ -3,13 +3,15 @@ import os
 from tqdm import tqdm
 import sys
 import pandas as pd
+import sqlite3
 
-def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False, jobs_to_include=None, experience_level=None):
+def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False, jobs_to_include=None, experience_level=None, db_path="data/jobs.db"):
     """
-    jobs: list of dicts, each with 'title' and 'description' and optionally 'analyzed'
+    jobs: list of dicts, each with 'title' and 'description' and optionally 'analyzed' and 'id'
     homeoffice_required: if True, only keep jobs that are very likely 100% home office/remote
     jobs_to_include: list of terms that should be preferred in job filtering
     experience_level: string, e.g. 'junior', 'mid', 'senior', 'any'
+    db_path: path to database for marking jobs as analyzed
     
     Returns a tuple with three lists:
     1. step1_filtered_titles - after basic filtering
@@ -217,4 +219,21 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
     step3_filtered_titles = [job['title'].strip().rstrip('.') for job in filtered_jobs_step3 if job['title'].strip()]
     print(f"Step 3 results: {len(step3_filtered_titles)} jobs passed the interest filtering.")
     
+    # Mark all processed jobs as analyzed in the database
+    mark_jobs_as_analyzed(jobs, db_path)
+    
     return (step1_filtered_titles, step2_filtered_titles, step3_filtered_titles)
+
+def mark_jobs_as_analyzed(jobs, db_path):
+    """Mark jobs as analyzed in the database"""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        for job in jobs:
+            if 'id' in job:
+                # Use job ID if available
+                cursor.execute("UPDATE jobs SET analyzed = 1 WHERE id = ?", (job['id'],))
+            else:
+                # Fallback to title+company identification
+                cursor.execute("UPDATE jobs SET analyzed = 1 WHERE title = ? AND company = ?", 
+                             (job['title'], job.get('company', '')))
+        conn.commit()

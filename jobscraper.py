@@ -29,8 +29,7 @@ import sqlite3
 def initialize_database(db_path="data/jobs.db"):
     """
     Centralized database initialization and schema management.
-    Ensures all tables exist with proper schemas and handles migrations.
-    This function should be called at the start of the script to ensure database integrity.
+    Creates the normalized schema with jobs and job_filters tables.
     """
     # Ensure the data directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -38,100 +37,83 @@ def initialize_database(db_path="data/jobs.db"):
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         
-        # Define all table schemas
-        table_schemas = {
-            'stepstone_jobs': {
-                'create_sql': '''
-                    CREATE TABLE IF NOT EXISTS stepstone_jobs (
-                        title TEXT,
-                        company TEXT,
-                        location TEXT,
-                        description TEXT,
-                        link TEXT UNIQUE,
-                        deleted INTEGER DEFAULT 0,
-                        analyzed INTEGER DEFAULT 0
-                    )
-                ''',
-                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
-            },
-            'filtered_jobs_step2': {
-                'create_sql': '''
-                    CREATE TABLE IF NOT EXISTS filtered_jobs_step2 (
-                        title TEXT,
-                        company TEXT,
-                        location TEXT,
-                        description TEXT,
-                        link TEXT UNIQUE,
-                        deleted INTEGER DEFAULT 0,
-                        analyzed INTEGER DEFAULT 0
-                    )
-                ''',
-                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
-            },
-            'filtered_jobs_step3': {
-                'create_sql': '''
-                    CREATE TABLE IF NOT EXISTS filtered_jobs_step3 (
-                        title TEXT,
-                        company TEXT,
-                        location TEXT,
-                        description TEXT,
-                        link TEXT UNIQUE,
-                        deleted INTEGER DEFAULT 0,
-                        analyzed INTEGER DEFAULT 0
-                    )
-                ''',
-                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
-            }
-        }
+        # Create jobs table (single source of truth)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                company TEXT,
+                location TEXT,
+                description TEXT,
+                link TEXT,
+                source TEXT DEFAULT 'stepstone',
+                deleted INTEGER DEFAULT 0,
+                analyzed INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(title, company)
+            )
+        ''')
         
-        # Create tables and ensure proper schema
-        for table_name, schema_info in table_schemas.items():
-            # Create table if it doesn't exist
-            cursor.execute(schema_info['create_sql'])
-            
-            # Check existing columns
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            existing_columns = [info[1] for info in cursor.fetchall()]
-            
-            # Add missing columns if any
-            for required_column in schema_info['required_columns']:
-                if required_column not in existing_columns:
-                    if required_column == 'deleted':
-                        print(f"Adding 'deleted' column to {table_name} table...")
-                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN deleted INTEGER DEFAULT 0")
-                    elif required_column == 'analyzed':
-                        print(f"Adding 'analyzed' column to {table_name} table...")
-                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN analyzed INTEGER DEFAULT 0")
-                    # Add other column types here as needed in the future
+        # Create job_filters table (for filter results)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS job_filters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER,
+                filter_type TEXT NOT NULL,
+                value INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (job_id) REFERENCES jobs (id),
+                UNIQUE(job_id, filter_type)
+            )
+        ''')
         
         conn.commit()
-        print(f"Database initialization complete. All tables verified at {db_path}")
+        print(f"Database initialization complete. Normalized schema ready at {db_path}")
 
 
-def get_jobs_from_db(table_name, db_path="data/jobs.db", include_deleted=False):
+def get_jobs_from_db(filter_type=None, db_path="data/jobs.db", include_deleted=False):
     """
-    Centralized function to load jobs from database with consistent deleted filtering.
+    Centralized function to load jobs from database with optional filtering.
+    
+    Args:
+        filter_type: None for all jobs, 'step2_homeoffice', 'step3_interest', etc.
+        db_path: Path to database
+        include_deleted: Whether to include deleted jobs
+    
+    Returns:
+        DataFrame with job data
     """
     if not os.path.exists(db_path):
-        # Return empty DataFrame with proper columns based on table type
-        if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
-            return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
-        else:
-            return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
+        return pd.DataFrame(columns=['id', 'title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed'])
     
     with sqlite3.connect(db_path) as conn:
         try:
-            if include_deleted:
-                return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+            if filter_type is None:
+                # Get all jobs
+                if include_deleted:
+                    query = "SELECT * FROM jobs"
+                else:
+                    query = "SELECT * FROM jobs WHERE deleted = 0"
             else:
-                return pd.read_sql(f"SELECT * FROM {table_name} WHERE deleted = 0 OR deleted IS NULL", conn)
+                # Get jobs with specific filter
+                if include_deleted:
+                    query = """
+                        SELECT j.* FROM jobs j
+                        JOIN job_filters jf ON j.id = jf.job_id
+                        WHERE jf.filter_type = ? AND jf.value = 1
+                    """
+                else:
+                    query = """
+                        SELECT j.* FROM jobs j
+                        JOIN job_filters jf ON j.id = jf.job_id
+                        WHERE jf.filter_type = ? AND jf.value = 1 AND j.deleted = 0
+                    """
+                return pd.read_sql(query, conn, params=[filter_type])
+            
+            return pd.read_sql(query, conn)
         except Exception as e:
-            print(f"Error loading jobs from {table_name}: {e}")
-            # Return empty DataFrame with proper columns
-            if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
-                return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
-            else:
-                return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
+            print(f"Error loading jobs: {e}")
+            return pd.DataFrame(columns=['id', 'title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed'])
 
 
 def initialize_driver():
@@ -188,23 +170,30 @@ def load_config(config_file="config.json"):
         print("Error parsing the configuration file.")
         return {}
 
-def load_existing_jobs(table_name, db_path="data/jobs.db"):
-    """Load existing jobs from a SQLite table if it exists."""
-    return get_jobs_from_db(table_name, db_path, include_deleted=True)
+def load_existing_jobs(db_path="data/jobs.db"):
+    """Load existing jobs from the jobs table."""
+    return get_jobs_from_db(filter_type=None, db_path=db_path, include_deleted=True)
 
 def get_unique_jobs(existing_df, new_df):
-    """Compare existing and new jobs, return only unique new jobs."""
+    """Compare existing and new jobs, return only unique new jobs based on (title, company)."""
     if existing_df.empty:
         return new_df
     
-    # Create a set of existing job links for quick lookup
-    existing_links = set(existing_df['link'])
+    # Create a set of existing (title, company) pairs for deduplication
+    existing_title_company = set()
+    for _, row in existing_df.iterrows():
+        existing_title_company.add((row['title'], row['company']))
     
-    # Filter new jobs to only include those not in existing_links
-    unique_new_jobs = new_df[~new_df['link'].isin(existing_links)]
+    # Filter new jobs to only include those not in existing_title_company
+    unique_new_jobs = []
+    for _, row in new_df.iterrows():
+        if (row['title'], row['company']) not in existing_title_company:
+            unique_new_jobs.append(row)
     
-    print(f"Found {len(unique_new_jobs)} new unique jobs out of {len(new_df)} total jobs")
-    return unique_new_jobs
+    unique_new_jobs_df = pd.DataFrame(unique_new_jobs) if unique_new_jobs else pd.DataFrame(columns=new_df.columns)
+    
+    print(f"Found {len(unique_new_jobs_df)} new unique jobs out of {len(new_df)} total jobs")
+    return unique_new_jobs_df
 
 def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Initializing web driver...")
@@ -217,7 +206,7 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     # Load existing title+company pairs from DB to avoid duplicates
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT title, company FROM stepstone_jobs WHERE deleted = 0 OR deleted IS NULL")
+        cur.execute("SELECT title, company FROM jobs WHERE deleted = 0 OR deleted IS NULL")
         existing_title_company = set((row[0], row[1]) for row in cur.fetchall())
 
     # Extract domain from the URL for relative links
@@ -301,10 +290,10 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
                     'link': job_link
                 }
                 jobs_data.append(job_entry)
-                # Write to DB immediately
+                # Write to DB immediately using new schema
                 try:
                     conn.execute(
-                        "INSERT INTO stepstone_jobs (title, company, location, description, link) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT OR IGNORE INTO jobs (title, company, location, description, link, source) VALUES (?, ?, ?, ?, ?, 'stepstone')",
                         (title, company, location, full_description, job_link)
                     )
                     conn.commit()
@@ -371,8 +360,8 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     st.title("Job Listings")
 
     # Load filtered job data using centralized function
-    filtered_jobs_step2_df = get_jobs_from_db("filtered_jobs_step2", db_path)
-    filtered_jobs_step3_df = get_jobs_from_db("filtered_jobs_step3", db_path)
+    filtered_jobs_step2_df = get_jobs_from_db("step2_homeoffice", db_path)
+    filtered_jobs_step3_df = get_jobs_from_db("step3_interest", db_path)
     
     # Category selector
     options = ["All Jobs"]
@@ -391,8 +380,8 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
         st.write(f"{len(display_df)} home-office jobs found.")
     else:
         if jobs_df is None:
-            # Default to stepstone_jobs table using centralized function
-            jobs_df = get_jobs_from_db("stepstone_jobs", db_path)
+            # Default to all jobs using centralized function
+            jobs_df = get_jobs_from_db(filter_type=None, db_path=db_path)
         display_df = jobs_df.copy()
         st.write(f"{len(display_df)} jobs found.")
 
@@ -427,15 +416,15 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             for idx in selected_indices:
-                job_link = display_df.loc[idx, 'link']
-                
-                # Update all relevant tables
-                for table in ["stepstone_jobs", "filtered_jobs_step2", "filtered_jobs_step3"]:
-                    try:
-                        cursor.execute(f"UPDATE {table} SET deleted = 1 WHERE link = ?", (job_link,))
-                    except Exception:
-                        # Table might not exist
-                        pass
+                # Get job ID or use title+company for identification
+                if 'id' in display_df.columns:
+                    job_id = display_df.loc[idx, 'id']
+                    cursor.execute("UPDATE jobs SET deleted = 1 WHERE id = ?", (job_id,))
+                else:
+                    # Fallback to title+company identification
+                    title = display_df.loc[idx, 'title']
+                    company = display_df.loc[idx, 'company']
+                    cursor.execute("UPDATE jobs SET deleted = 1 WHERE title = ? AND company = ?", (title, company))
             
             conn.commit()
         
@@ -454,7 +443,7 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
 
 def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
     """
-    Filter and save job results for each filtering step
+    Update job filter results in the job_filters table
     
     filter_results: Tuple of (step1_titles, step2_titles, step3_titles) from the filter_jobs_by_interest function
     """
@@ -466,36 +455,65 @@ def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
     
-    # Process step 2 filtered jobs (home office filtered)
-    step2_titles_lower = [title.lower() for title in step2_titles]
-    filtered_jobs_step2_df = jobs_df[jobs_df['title_lower'].isin(step2_titles_lower)]
-    found_titles_lower = set(filtered_jobs_step2_df['title_lower'])
-    for title in step2_titles_lower:
-        if title not in found_titles_lower:
-            print(f"Step 2 - Title not found: {title}")
-    filtered_jobs_step2_df = filtered_jobs_step2_df.copy()
-    
-    # Process step 3 filtered jobs (interest filtered)
-    step3_titles_lower = [title.lower() for title in step3_titles]
-    filtered_jobs_step3_df = jobs_df[jobs_df['title_lower'].isin(step3_titles_lower)]
-    found_titles_lower = set(filtered_jobs_step3_df['title_lower'])
-    for title in step3_titles_lower:
-        if title not in found_titles_lower:
-            print(f"Step 3 - Title not found: {title}")
-    filtered_jobs_step3_df = filtered_jobs_step3_df.copy()
-    
-    # Remove the helper column
-    filtered_jobs_step2_df.drop('title_lower', axis=1, inplace=True)
-    filtered_jobs_step3_df.drop('title_lower', axis=1, inplace=True)
-    jobs_df.drop('title_lower', axis=1, inplace=True)
-    
-    # Persist filtered jobs to SQLite
     with sqlite3.connect(db_path) as conn:
-        filtered_jobs_step2_df.to_sql("filtered_jobs_step2", conn, if_exists="replace", index=False)
-        filtered_jobs_step3_df.to_sql("filtered_jobs_step3", conn, if_exists="replace", index=False)
+        cursor = conn.cursor()
+        
+        # Process step 2 filtered jobs (home office filtered)
+        step2_titles_lower = [title.lower() for title in step2_titles]
+        step2_jobs = jobs_df[jobs_df['title_lower'].isin(step2_titles_lower)]
+        found_titles_lower = set(step2_jobs['title_lower'])
+        for title in step2_titles_lower:
+            if title not in found_titles_lower:
+                print(f"Step 2 - Title not found: {title}")
+        
+        # Update job_filters table for step 2
+        for _, job in step2_jobs.iterrows():
+            if 'id' in job:
+                job_id = job['id']
+            else:
+                # Find job_id by title+company
+                cursor.execute("SELECT id FROM jobs WHERE title = ? AND company = ?", (job['title'], job['company']))
+                result = cursor.fetchone()
+                if result:
+                    job_id = result[0]
+                else:
+                    continue
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO job_filters (job_id, filter_type, value)
+                VALUES (?, 'step2_homeoffice', 1)
+            """, (job_id,))
+        
+        # Process step 3 filtered jobs (interest filtered)
+        step3_titles_lower = [title.lower() for title in step3_titles]
+        step3_jobs = jobs_df[jobs_df['title_lower'].isin(step3_titles_lower)]
+        found_titles_lower = set(step3_jobs['title_lower'])
+        for title in step3_titles_lower:
+            if title not in found_titles_lower:
+                print(f"Step 3 - Title not found: {title}")
+        
+        # Update job_filters table for step 3
+        for _, job in step3_jobs.iterrows():
+            if 'id' in job:
+                job_id = job['id']
+            else:
+                # Find job_id by title+company
+                cursor.execute("SELECT id FROM jobs WHERE title = ? AND company = ?", (job['title'], job['company']))
+                result = cursor.fetchone()
+                if result:
+                    job_id = result[0]
+                else:
+                    continue
+            
+            cursor.execute("""
+                INSERT OR REPLACE INTO job_filters (job_id, filter_type, value)
+                VALUES (?, 'step3_interest', 1)
+            """, (job_id,))
+        
+        conn.commit()
     
-    print(f"Step 2 filtered jobs (homeoffice): {len(filtered_jobs_step2_df)} jobs saved to table 'filtered_jobs_step2'")
-    print(f"Step 3 filtered jobs (interests): {len(filtered_jobs_step3_df)} jobs saved to table 'filtered_jobs_step3'")
+    print(f"Step 2 filtered jobs (homeoffice): {len(step2_jobs)} jobs marked in job_filters")
+    print(f"Step 3 filtered jobs (interests): {len(step3_jobs)} jobs marked in job_filters")
 
 def get_experience_terms(level):
     """
@@ -562,17 +580,16 @@ def main():
         return
 
     if args.stepstone:
-        existing_jobs_df = load_existing_jobs("stepstone_jobs", db_path)
+        existing_jobs_df = load_existing_jobs(db_path)
         new_jobs_df = scrape_jobs('stepstone', stepstone_url)
         unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
-        combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
-        with sqlite3.connect(db_path) as conn:
-            combined_jobs_df.to_sql("stepstone_jobs", conn, if_exists="replace", index=False)
-        print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
-        jobs_df = combined_jobs_df
+        print(f"Added {len(unique_new_jobs)} new jobs to database.")
+        # Jobs are already inserted during scraping, so just load all jobs
+        jobs_df = load_existing_jobs(db_path)
+        print(f"Total jobs in database: {len(jobs_df)}")
     else:
-        # Default to StepStone if no argument is given
-        jobs_df = load_existing_jobs("stepstone_jobs", db_path)
+        # Default to all jobs if no argument is given
+        jobs_df = load_existing_jobs(db_path)
 
     if args.filter:
         if 'deleted' in jobs_df.columns:
@@ -582,8 +599,8 @@ def main():
             # If deleted column doesn't exist, use all jobs
             jobs_with_filter = jobs_df
             
-        jobs_list = jobs_with_filter[['title', 'description']].to_dict(orient='records')
-        filter_results = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level)
+        jobs_list = jobs_with_filter[['id', 'title', 'description', 'company']].to_dict(orient='records')
+        filter_results = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level, db_path)
         print(f"Processing of jobs complete:")
         print(f"  - Step 1 (Basic filtering): {len(filter_results[0])} jobs")
         print(f"  - Step 2 (Home office filtered): {len(filter_results[1])} jobs")
