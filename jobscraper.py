@@ -1,3 +1,18 @@
+import os
+import sys
+import glob
+import time
+import pickle
+import json
+import hashlib
+import traceback
+from datetime import datetime, timedelta
+from collections import Counter
+import argparse
+import pandas as pd
+import re
+from tqdm import tqdm
+import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -6,28 +21,122 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
-import pandas as pd
-import re
-from tqdm import tqdm
-import time
-import os
-import hashlib
-import pickle
-from datetime import datetime
-import sys
-import traceback
-from collections import Counter
-import re
-from datetime import timedelta
-import argparse
-from gpt_filter import filter_job_titles_by_interest
-import json
-import webbrowser
+from gpt_filter import filter_jobs_by_interest
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+import sqlite3
+
+
+def initialize_database(db_path="data/jobs.db"):
+    """
+    Centralized database initialization and schema management.
+    Ensures all tables exist with proper schemas and handles migrations.
+    This function should be called at the start of the script to ensure database integrity.
+    """
+    # Ensure the data directory exists
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Define all table schemas
+        table_schemas = {
+            'stepstone_jobs': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS stepstone_jobs (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            },
+            'filtered_jobs_step2': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS filtered_jobs_step2 (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            },
+            'filtered_jobs_step3': {
+                'create_sql': '''
+                    CREATE TABLE IF NOT EXISTS filtered_jobs_step3 (
+                        title TEXT,
+                        company TEXT,
+                        location TEXT,
+                        description TEXT,
+                        link TEXT UNIQUE,
+                        deleted INTEGER DEFAULT 0,
+                        analyzed INTEGER DEFAULT 0
+                    )
+                ''',
+                'required_columns': ['title', 'company', 'location', 'description', 'link', 'deleted', 'analyzed']
+            }
+        }
+        
+        # Create tables and ensure proper schema
+        for table_name, schema_info in table_schemas.items():
+            # Create table if it doesn't exist
+            cursor.execute(schema_info['create_sql'])
+            
+            # Check existing columns
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            existing_columns = [info[1] for info in cursor.fetchall()]
+            
+            # Add missing columns if any
+            for required_column in schema_info['required_columns']:
+                if required_column not in existing_columns:
+                    if required_column == 'deleted':
+                        print(f"Adding 'deleted' column to {table_name} table...")
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN deleted INTEGER DEFAULT 0")
+                    elif required_column == 'analyzed':
+                        print(f"Adding 'analyzed' column to {table_name} table...")
+                        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN analyzed INTEGER DEFAULT 0")
+                    # Add other column types here as needed in the future
+        
+        conn.commit()
+        print(f"Database initialization complete. All tables verified at {db_path}")
+
+
+def get_jobs_from_db(table_name, db_path="data/jobs.db", include_deleted=False):
+    """
+    Centralized function to load jobs from database with consistent deleted filtering.
+    """
+    if not os.path.exists(db_path):
+        # Return empty DataFrame with proper columns based on table type
+        if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
+            return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
+        else:
+            return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
+    
+    with sqlite3.connect(db_path) as conn:
+        try:
+            if include_deleted:
+                return pd.read_sql(f"SELECT * FROM {table_name}", conn)
+            else:
+                return pd.read_sql(f"SELECT * FROM {table_name} WHERE deleted = 0 OR deleted IS NULL", conn)
+        except Exception as e:
+            print(f"Error loading jobs from {table_name}: {e}")
+            # Return empty DataFrame with proper columns
+            if table_name == "stepstone_jobs" or "filtered_jobs" in table_name:
+                return pd.DataFrame(columns=['title', 'company', 'location', 'description', 'link', 'deleted'])
+            else:
+                return pd.DataFrame(columns=['title', 'description', 'link', 'deleted'])
 
 
 def initialize_driver():
     options = Options()
+    options.add_argument('--headless')
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
@@ -98,7 +207,25 @@ def load_config(config_file="config.json"):
         print("Error parsing the configuration file.")
         return {}
 
-def scrape_jobs_from_stepstone(url, pages=1):
+def load_existing_jobs(table_name, db_path="data/jobs.db"):
+    """Load existing jobs from a SQLite table if it exists."""
+    return get_jobs_from_db(table_name, db_path, include_deleted=True)
+
+def get_unique_jobs(existing_df, new_df):
+    """Compare existing and new jobs, return only unique new jobs."""
+    if existing_df.empty:
+        return new_df
+    
+    # Create a set of existing job links for quick lookup
+    existing_links = set(existing_df['link'])
+    
+    # Filter new jobs to only include those not in existing_links
+    unique_new_jobs = new_df[~new_df['link'].isin(existing_links)]
+    
+    print(f"Found {len(unique_new_jobs)} new unique jobs out of {len(new_df)} total jobs")
+    return unique_new_jobs
+
+def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Initializing web driver...")
     driver = initialize_driver()
     print("Opening URL...")
@@ -106,40 +233,106 @@ def scrape_jobs_from_stepstone(url, pages=1):
     print("Handling cookie consent...")
     handle_cookies(driver)
 
+    # Load existing title+company pairs from DB to avoid duplicates
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT title, company FROM stepstone_jobs WHERE deleted = 0 OR deleted IS NULL")
+        existing_title_company = set((row[0], row[1]) for row in cur.fetchall())
+
     # Extract domain from the URL for relative links
     parsed_url = urlparse(url)
     domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    base_path = parsed_url.path
-    query_dict = parse_qs(parsed_url.query)
 
     jobs_data = []
-    for page in tqdm(range(1, pages + 1)):
-        # Set the 'page' parameter in the query string
-        query_dict['page'] = [str(page)]
-        new_query = urlencode(query_dict, doseq=True)
-        new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, base_path, '', new_query, ''))
-        driver.get(new_url)
-        print("Navigated to:", driver.current_url)
-        time.sleep(3)  # Increase sleep to observe the change
-        job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
-        if not job_cards:
-            print(f"No job cards found on page {page}. Stopping pagination.")
-            break
-        for job_card in job_cards:
-            title = job_card.find_element(By.XPATH, './/h2').text
-            job_link_element = job_card.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
-            job_link = job_link_element.get_attribute('href')
-
-            # Check if the link is relative and prepend the domain if necessary
-            if job_link.startswith("/"):
-                job_link = domain + job_link
-            try:
-                description_element = job_card.find_element(By.XPATH, './/div[@data-at="jobcard-content"]')
-                description = description_element.text
-            except Exception as e:
-                description = "No description available"
-            jobs_data.append({'title': title, 'description': description, 'link': job_link})
-
+    with sqlite3.connect(db_path) as conn:
+        for page in tqdm(range(1, pages + 1)):
+            query_dict = parse_qs(parsed_url.query)
+            query_dict['page'] = [str(page)]
+            new_query = urlencode(query_dict, doseq=True)
+            new_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', new_query, ''))
+            driver.get(new_url)
+            print("Navigated to:", driver.current_url)
+            time.sleep(2)
+            job_cards = driver.find_elements(By.XPATH, '//article[@data-at="job-item"]')
+            if not job_cards:
+                print(f"No job cards found on page {page}. Stopping pagination.")
+                break
+            # --- Print how many jobs on this page are not yet in DB (by title+company) ---
+            page_title_company = set()
+            for job in job_cards:
+                title = job.find_element(By.XPATH, './/h2').text
+                try:
+                    company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
+                except Exception:
+                    company = ''
+                page_title_company.add((title, company))
+            new_jobs = [tc for tc in page_title_company if tc not in existing_title_company]
+            print(f"Page {page}: {len(new_jobs)} jobs (by title+company) are not yet in the DB and will be processed.")
+            print("Processing job cards...")
+            driver.execute_script("window.open('');")
+            detail_window = driver.window_handles[-1]
+            main_window = driver.current_window_handle
+            for job in tqdm(job_cards):
+                title = job.find_element(By.XPATH, './/h2').text
+                link_el = job.find_element(By.XPATH, './/a[@data-at="job-item-title"]')
+                job_link = link_el.get_attribute('href')
+                if job_link.startswith('/'):
+                    job_link = domain + job_link
+                try:
+                    company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
+                except Exception:
+                    company = ''
+                # Skip if already in DB by (title, company)
+                if (title, company) in existing_title_company:
+                    continue
+                try:
+                    location = job.find_element(By.XPATH, './/span[@data-at="job-item-location"]').text.strip()
+                except Exception:
+                    location = ''
+                full_description = ''
+                try:
+                    driver.switch_to.window(detail_window)
+                    driver.get(job_link)
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.TAG_NAME, 'article'))
+                        )
+                    except Exception:
+                        print(f"Error loading detail page for {job_link}")
+                        pass
+                    time.sleep(1.5)
+                    divs = driver.find_elements(By.TAG_NAME, 'div')
+                    div_texts = [d.text for d in divs if d.text and len(d.text) > 500]
+                    if div_texts:
+                        full_description = sorted(div_texts, key=len, reverse=True)[0]
+                    else:
+                        full_description = driver.find_element(By.TAG_NAME, 'body').text
+                    driver.switch_to.window(main_window)
+                except Exception as e:
+                    print(f"Fehler beim Laden der Detailseite: {e}")
+                    full_description = ''
+                    driver.switch_to.window(main_window)
+                job_entry = {
+                    'title': title,
+                    'company': company,
+                    'location': location,
+                    'description': full_description,
+                    'link': job_link
+                }
+                jobs_data.append(job_entry)
+                # Write to DB immediately
+                try:
+                    conn.execute(
+                        "INSERT INTO stepstone_jobs (title, company, location, description, link) VALUES (?, ?, ?, ?, ?)",
+                        (title, company, location, full_description, job_link)
+                    )
+                    conn.commit()
+                    existing_title_company.add((title, company))
+                except Exception as e:
+                    print(f"DB insert error for {job_link}: {e}")
+            driver.switch_to.window(detail_window)
+            driver.close()
+            driver.switch_to.window(main_window)
     driver.quit()
     return pd.DataFrame(jobs_data)
 
@@ -158,28 +351,21 @@ def scrape_jobs_from_indeed(url, pages=1):
             title_element = job_card.find_element(By.CSS_SELECTOR,
                                                   'h2.jobTitle.css-14z7akl.eu4oa1w0 a.jcs-JobTitle.css-jspxzf.eu4oa1w0')
             title = title_element.text
-            # Extract the job link
             job_link = title_element.get_attribute('href')
-            # Check if the link is relative and prepend the domain if necessary
             if job_link.startswith("/"):
-                job_link = domain + job_link
-            # Example of scraping job description with a hypothetical class name
-            # Attempt to find a description or print part of the HTML for inspection
+                job_link = "https://de.indeed.com" + job_link
             jobs_data.append({'title': title, 'description': "", 'link': job_link})
 
-        # Attempt to go to the next page
         try:
             current_url = driver.current_url
             next_page_btn = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, '//a[@aria-label="Next Page"]'))
             )
             next_page_btn.click()
-            # Wait for the URL to change or for a specific element that signifies a new page has loaded
             WebDriverWait(driver, 10).until(lambda driver: driver.current_url != current_url)
         except Exception as e:
             print("Error: Navigating to next page failed or last page reached:", str(e))
-            print("All found jobs up to now will be saved.")
-            return pd.DataFrame(jobs_data)
+            break
 
     driver.quit()
     return pd.DataFrame(jobs_data)
@@ -216,110 +402,174 @@ def construct_file_path(folder, filename):
     # Return the full path ready for use
     return file_path
 
-def create_html_output(filtered_jobs_df, filename):
-    # Select only 'title' and 'link' for HTML presentation
-    df = filtered_jobs_df[['title', 'link']]
+def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
+    st.set_page_config(page_title="Job Listings", layout="wide")
+    st.title("Job Listings")
 
-    # Convert 'link' column to HTML anchor tags
-    df.loc[:, 'link'] = df['link'].apply(lambda x: f'<a href="{x}">Link</a>')
+    # Load filtered job data using centralized function
+    filtered_jobs_step2_df = get_jobs_from_db("filtered_jobs_step2", db_path)
+    filtered_jobs_step3_df = get_jobs_from_db("filtered_jobs_step3", db_path)
+    
+    # Category selector
+    options = ["All Jobs"]
+    if not filtered_jobs_step2_df.empty:
+        options.append("Home Office Jobs (Step 2)")
+    if not filtered_jobs_step3_df.empty:
+        options.append("Interest Filtered Jobs (Step 3)")
+    
+    selected_category = st.radio("Select job category to display:", options, index=len(options)-1)
 
-    # Export to HTML, integrating the CSS and nightmode
-    current_hour = datetime.now().hour
-    night_mode = current_hour >= 18 or current_hour < 8
-    css_filename = "style_dark.css" if night_mode else "style_normal.css"
-    css_choice = os.path.join('template', css_filename)
+    if selected_category == "Interest Filtered Jobs (Step 3)" and not filtered_jobs_step3_df.empty:
+        display_df = filtered_jobs_step3_df.copy()
+        st.write(f"{len(display_df)} interest-filtered jobs found.")
+    elif selected_category == "Home Office Jobs (Step 2)" and not filtered_jobs_step2_df.empty:
+        display_df = filtered_jobs_step2_df.copy()
+        st.write(f"{len(display_df)} home-office jobs found.")
+    else:
+        if jobs_df is None:
+            # Default to stepstone_jobs table using centralized function
+            jobs_df = get_jobs_from_db("stepstone_jobs", db_path)
+        display_df = jobs_df.copy()
+        st.write(f"{len(display_df)} jobs found.")
 
-    # Generate HTML for the DataFrame
-    html_table = generate_html_table(df)
+    # Ensure the deleted column exists in the display DataFrame
+    if 'deleted' not in display_df.columns:
+        display_df['deleted'] = 0
 
-    # Complete HTML document
-    html_output = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Job Listings</title>
-        <link rel="stylesheet" type="text/css" href="{css_choice}">
-        <script>
-        function getSelectedRows() {{
-            const selectedIds = [];
-            document.querySelectorAll('input[name="rowCheckbox"]:checked').forEach((checkbox) => {{
-                selectedIds.push(checkbox.value);
-            }});
-            alert("Selected IDs: " + selectedIds.join(", "));
-        }}
-    </script>
-    </head>
-    <body>
-        <h2 style="text-align:center;">Job Listings</h2>
-        {html_table}
-        <button onclick="getSelectedRows()">Get Selected IDs</button>
+    display_df = display_df.reset_index(drop=True)
+    display_df['Select'] = False
+    # Sort by company name if the column exists
+    if 'company' in display_df.columns:
+        display_df = display_df.sort_values(by='company', na_position='last').reset_index(drop=True)
+    # Show title, company, location, and link in the main table, and make link clickable
+    columns = ['title', 'company', 'location', 'link', 'Select']
+    columns = [col for col in columns if col in display_df.columns]
+    table_df = display_df[columns].copy()
+    selected = st.data_editor(
+        table_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        disabled=[col for col in ['title', 'link', 'company', 'location'] if col in table_df.columns],
+        column_config={
+            "link": st.column_config.LinkColumn("Link", display_text="Open Link")
+        } if 'link' in table_df.columns else None
+    )
+    
+    # Delete selected jobs
+    selected_indices = list(selected[selected['Select']].index)
+    st.write("Selected job indices:", selected_indices)
+    
+    if selected_indices and st.button("Mark Selected Jobs as Deleted"):
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            for idx in selected_indices:
+                job_link = display_df.loc[idx, 'link']
+                
+                # Update all relevant tables
+                for table in ["stepstone_jobs", "filtered_jobs_step2", "filtered_jobs_step3"]:
+                    try:
+                        cursor.execute(f"UPDATE {table} SET deleted = 1 WHERE link = ?", (job_link,))
+                    except Exception:
+                        # Table might not exist
+                        pass
+            
+            conn.commit()
+        
+        st.success(f"Marked {len(selected_indices)} job(s) as deleted")
+        st.rerun()
+    
+    # Display selected job details
+    for idx, row in selected[selected['Select']].iterrows():
+        st.markdown(f"**{row['title']}**  ")
+        if 'company' in row:
+            st.markdown(f"*Company:* {row['company']}")
+        if 'location' in row:
+            st.markdown(f"*Location:* {row['location']}")
+        st.markdown(f"[Link to job posting]({display_df.loc[idx, 'link']})")
+        st.markdown("---")
 
-    </body>
-    </html>
+def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
     """
-    # Save the HTML file
-    with open(filename, "w") as f:
-        f.write(html_output)
-
-
-def generate_html_table(df):
-    table_styles = "style='width: 60%; border-collapse: collapse;'"
-    html = f"<table {table_styles}>"
-    # Add column headers, including one for checkboxes
-    html += "<tr>"
-    for col in df.columns:
-        formatted_col = col.capitalize()  # Capitalize the first letter, rest lowercase
-        html += f"<th>{formatted_col}</th>"
-    html += "<th>Select</th>"
-    html += "</tr>"
-
-    # Add rows with a checkbox in the first column
-    for index, row in df.iterrows():
-        html += f"<tr>"
-        for item in row:
-            html += f"<td>{item}</td>"
-        html += f"<td><input type='checkbox' name='rowCheckbox' value='{index}'></td>"
-        html += "</tr>"
-
-    html += "</table>"
-    return html
-
-
-def filter_and_output_jobs(jobs_df, aligned_titles):
-    html_filename = "filtered_jobs.html"
-
+    Filter and save job results for each filtering step
+    
+    filter_results: Tuple of (step1_titles, step2_titles, step3_titles) from the filter_jobs_by_interest function
+    """
+    step1_titles, step2_titles, step3_titles = filter_results
+    
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
-    # Convert aligned_titles to lowercase
-    aligned_titles_lower = [title.lower() for title in aligned_titles]
-
-    # Filter DataFrame to keep rows where 'title_lower' matches any of the aligned titles
-    filtered_jobs_df = jobs_df[jobs_df['title_lower'].isin(aligned_titles_lower)]
-
-    # Debug output for titles not found
-    found_titles_lower = set(filtered_jobs_df['title_lower'])
-    for title in aligned_titles_lower:
+    
+    # Process step 2 filtered jobs (home office filtered)
+    step2_titles_lower = [title.lower() for title in step2_titles]
+    filtered_jobs_step2_df = jobs_df[jobs_df['title_lower'].isin(step2_titles_lower)]
+    found_titles_lower = set(filtered_jobs_step2_df['title_lower'])
+    for title in step2_titles_lower:
         if title not in found_titles_lower:
-            print(f"Title not found: {title}")
+            print(f"Step 2 - Title not found: {title}")
+    filtered_jobs_step2_df = filtered_jobs_step2_df.copy()
+    
+    # Process step 3 filtered jobs (interest filtered)
+    step3_titles_lower = [title.lower() for title in step3_titles]
+    filtered_jobs_step3_df = jobs_df[jobs_df['title_lower'].isin(step3_titles_lower)]
+    found_titles_lower = set(filtered_jobs_step3_df['title_lower'])
+    for title in step3_titles_lower:
+        if title not in found_titles_lower:
+            print(f"Step 3 - Title not found: {title}")
+    filtered_jobs_step3_df = filtered_jobs_step3_df.copy()
+    
+    # Remove the helper column
+    filtered_jobs_step2_df.drop('title_lower', axis=1, inplace=True)
+    filtered_jobs_step3_df.drop('title_lower', axis=1, inplace=True)
+    jobs_df.drop('title_lower', axis=1, inplace=True)
+    
+    # Persist filtered jobs to SQLite
+    with sqlite3.connect(db_path) as conn:
+        filtered_jobs_step2_df.to_sql("filtered_jobs_step2", conn, if_exists="replace", index=False)
+        filtered_jobs_step3_df.to_sql("filtered_jobs_step3", conn, if_exists="replace", index=False)
+    
+    print(f"Step 2 filtered jobs (homeoffice): {len(filtered_jobs_step2_df)} jobs saved to table 'filtered_jobs_step2'")
+    print(f"Step 3 filtered jobs (interests): {len(filtered_jobs_step3_df)} jobs saved to table 'filtered_jobs_step3'")
 
-    filtered_jobs_df = filtered_jobs_df.copy()
-    filtered_jobs_df.drop('title_lower', axis=1, inplace=True)
-
-
-    create_html_output(filtered_jobs_df, html_filename)
-    print("Filtering completed. HTML Export done. Opening HTML file in default browser...")
-    html_file_path = os.path.abspath(html_filename)
-    webbrowser.open('file://' + html_file_path)
+def get_experience_terms(level):
+    """
+    Convert experience level setting to include/exclude terms.
+    Returns a dict with terms to include and exclude.
+    """
+    experience_mapping = {
+        "junior": {
+            "include": ["junior","entry-level", "graduate", "trainee", "0-2 years", "0-1 years"],
+            "exclude": ["senior", "expert", "lead", "staff", "principal", "architect", "manager", "director", 
+                      "several years of work experience"]
+        },
+        "mid": {
+            "include": ["intermediate", "mid-level", "mid level", "associate", "2-4 years", "3-5 years"],
+            "exclude": ["senior", "expert", "principal", "lead", "junior", "entry level", "entry-level", 
+                      "graduate", "trainee", "8+ years", "10+ years"]
+        },
+        "senior": {
+            "include": ["senior", "expert", "lead", "staff", "architect", "5+ years", "7+ years"],
+            "exclude": ["junior", "entry level", "entry-level", "graduate", "trainee", "0-2 years", "internship"]
+        },
+        "any": {
+            "include": [],
+            "exclude": []
+        }
+    }
+    
+    # Default to "any" if the specified level is not found
+    return experience_mapping.get(level.lower(), experience_mapping["any"])
 
 def main():
-    indeed_filename = construct_file_path("data", "indeed_jobs_df.pkl")
-    stepstone_filename = construct_file_path("data", "stepstone_jobs_df.pkl")
-
+    db_path = "data/jobs.db"
+    
+    # Initialize database schema and ensure integrity
+    initialize_database(db_path)
+    
     parser = argparse.ArgumentParser(description="AI Job scraper script")
-    parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')
+    parser.add_argument('--indeed', action='store_true', help='Scrape jobs from Indeed')  # Currently disabled
     parser.add_argument('--stepstone', action='store_true', help='Scrape jobs from StepStone')
     parser.add_argument('--filter', action='store_true', help='Filter job offers by interests')
+    parser.add_argument('--dashboard', action='store_true', help='Show the dashboard for the latest job file')
     args = parser.parse_args()
 
     config = load_config()
@@ -327,57 +577,75 @@ def main():
     stepstone_url = config.get("stepstone_url", "")
     indeed_url = config.get("indeed_url", "")
     user_interests = config.get("user_interests", [])
-    jobs_to_avoid = config.get("jobs_to_avoid", [])
+    experience_level = config.get("experience_level", "any")
+    custom_exclude_terms = config.get("custom_exclude_terms", [])
+    homeoffice_required = config.get("homeoffice_required", False)
+    
+    # Get experience-based terms
+    experience_terms = get_experience_terms(experience_level)
+    
+    # Combine custom exclude terms with experience-based exclude terms
+    jobs_to_avoid = experience_terms["exclude"] + custom_exclude_terms
+    
+    # Include terms will be used to refine job filtering
+    jobs_to_include = experience_terms["include"]
 
-    # Check for existence of job files and handle cases
-    indeed_exists = os.path.isfile(indeed_filename)
-    stepstone_exists = os.path.isfile(stepstone_filename)
+    if args.dashboard:
+        run_streamlit_dashboard(db_path=db_path)
+        return
 
-    if args.indeed:
-        jobs_df = scrape_jobs('indeed', indeed_url)
-        jobs_df.to_pickle(indeed_filename)
-        print("Finished scraping Indeed and saved jobs to pickle file.")
-    elif args.stepstone:
-        jobs_df = scrape_jobs('stepstone', stepstone_url)
-        jobs_df.to_pickle(stepstone_filename)
-        print("Finished scraping StepStone and saved jobs to pickle file.")
+    if args.stepstone:
+        # Load existing jobs
+        existing_jobs_df = load_existing_jobs("stepstone_jobs", db_path)
+        # Scrape new jobs
+        new_jobs_df = scrape_jobs('stepstone', stepstone_url)
+        # Get only unique new jobs
+        unique_new_jobs = get_unique_jobs(existing_jobs_df, new_jobs_df)
+        # Combine existing and new unique jobs
+        combined_jobs_df = pd.concat([existing_jobs_df, unique_new_jobs], ignore_index=True)
+        # Save combined jobs to SQLite
+        with sqlite3.connect(db_path) as conn:
+            combined_jobs_df.to_sql("stepstone_jobs", conn, if_exists="replace", index=False)
+        print(f"Added {len(unique_new_jobs)} new jobs to StepStone database. Total jobs: {len(combined_jobs_df)}")
+        jobs_df = combined_jobs_df
     else:
-        print("Both Indeed and StepStone job files found.")
-        choice = input("Specify which one to use ('indeed' or 'stepstone'): ").lower().strip()
+        # Default to StepStone if no argument is given
+        jobs_df = load_existing_jobs("stepstone_jobs", db_path)
 
-        if choice == 'indeed':
-            print("Loading Indeed job file.")
-            jobs_df = pd.read_pickle(indeed_filename)
-        elif choice == 'stepstone':
-            print("Loading StepStone job file.")
-            jobs_df = pd.read_pickle(stepstone_filename)
+    if args.filter:
+        # Check if deleted column exists in the dataframe
+        if 'deleted' in jobs_df.columns:
+            # Only filter jobs that are not deleted
+            jobs_with_filter = jobs_df[jobs_df['deleted'].fillna(0) == 0]
         else:
-            print("Invalid choice. Exiting.")
-            sys.exit()
-
-        if args.filter:
-            job_titles = jobs_df['title'].tolist()
-            filtered_titles = filter_job_titles_by_interest(openai_api_key, job_titles, user_interests, jobs_to_avoid)
-            print(f"Processing of job titles complete. Keeeping {len(filtered_titles)} jobs.")
-            filter_and_output_jobs(jobs_df, filtered_titles)
-        else:
-            print("Missing arguments.")
-            print("""
-                Job Scraper Tool Usage Guide:
-        
-                - Scrape Indeed: Use '--indeed' to scrape job listings from Indeed.
-        
-                - Scrape StepStone: Use '--stepstone' to scrape job listings from StepStone.
-        
-                - Filter job offers: After scraping, use '--filter' to keep only job offers which match with the specified interests.
-        
-                Example Usage:
-                  python job_scraper.py --indeed                 # To scrape jobs from Indeed and save the results in jobs.df.
-                  python job_scraper.py --stepstone              # To scrape jobs from StepStone and save the results in jobs.df.
-                  python job_scraper.py --filter                 # To filter the results based on interests.
-        
-                Note: These flags can be used individually or combined to customize your job search and data processing workflow.
-                """)
+            # If deleted column doesn't exist, use all jobs
+            jobs_with_filter = jobs_df
+            
+        jobs_list = jobs_with_filter[['title', 'description']].to_dict(orient='records')
+        filter_results = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level)
+        print(f"Processing of jobs complete:")
+        print(f"  - Step 1 (Basic filtering): {len(filter_results[0])} jobs")
+        print(f"  - Step 2 (Home office filtered): {len(filter_results[1])} jobs")
+        print(f"  - Step 3 (Interest filtered): {len(filter_results[2])} jobs")
+        filter_and_output_jobs(jobs_with_filter, filter_results, db_path)
+    else:
+        print("Missing arguments.")
+        print("""
+            Job Scraper Tool Usage Guide:
+    
+            - Scrape Indeed: Use '--indeed' to scrape job listings from Indeed.
+    
+            - Scrape StepStone: Use '--stepstone' to scrape job listings from StepStone.
+    
+            - Filter job offers: After scraping, use '--filter' to keep only job offers which match with the specified interests.
+    
+            Example Usage:
+              python job_scraper.py --indeed                 # To scrape jobs from Indeed and save the results in jobs.df.
+              python job_scraper.py --stepstone              # To scrape jobs from StepStone and save the results in jobs.df.
+              python job_scraper.py --filter                 # To filter the results based on interests.
+    
+            Note: These flags can be used individually or combined to customize your job search and data processing workflow.
+            """)
 
     print("Done.")
 

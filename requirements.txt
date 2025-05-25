@@ -1,0 +1,6 @@
+openai
+pandas
+selenium
+tqdm
+webdriver-manager
+streamlit 

@@ -3,4 +3,9 @@ temp_work/
 __pycache__/
 venv
 config.json
-filtered_jobs.html
+*.html
+filtered_jobs_df.pkl
+all_jobs_input.csv
+prompt_step1.txt
+prompt_step2.txt
+prompt_step3.txt
