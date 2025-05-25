@@ -24,6 +24,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from gpt_filter import filter_jobs_by_interest
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import sqlite3
+import difflib
 
 
 def initialize_database(db_path="data/jobs.db"):
@@ -49,8 +50,7 @@ def initialize_database(db_path="data/jobs.db"):
                 source TEXT DEFAULT 'stepstone',
                 deleted INTEGER DEFAULT 0,
                 analyzed INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(title, company)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -175,24 +175,26 @@ def load_existing_jobs(db_path="data/jobs.db"):
     return get_jobs_from_db(filter_type=None, db_path=db_path, include_deleted=True)
 
 def get_unique_jobs(existing_df, new_df):
-    """Compare existing and new jobs, return only unique new jobs based on (title, company)."""
+    """Compare existing and new jobs, return only unique new jobs using fuzzy matching."""
     if existing_df.empty:
         return new_df
     
-    # Create a set of existing (title, company) pairs for deduplication
-    existing_title_company = set()
-    for _, row in existing_df.iterrows():
-        existing_title_company.add((row['title'], row['company']))
-    
-    # Filter new jobs to only include those not in existing_title_company
+    # Filter new jobs to only include those not similar to existing ones
     unique_new_jobs = []
-    for _, row in new_df.iterrows():
-        if (row['title'], row['company']) not in existing_title_company:
-            unique_new_jobs.append(row)
+    for _, new_job in new_df.iterrows():
+        is_duplicate = False
+        for _, existing_job in existing_df.iterrows():
+            if is_similar_job(new_job['title'], new_job['company'], 
+                            existing_job['title'], existing_job['company']):
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            unique_new_jobs.append(new_job)
     
     unique_new_jobs_df = pd.DataFrame(unique_new_jobs) if unique_new_jobs else pd.DataFrame(columns=new_df.columns)
     
-    print(f"Found {len(unique_new_jobs_df)} new unique jobs out of {len(new_df)} total jobs")
+    print(f"Found {len(unique_new_jobs_df)} new unique jobs out of {len(new_df)} total jobs (using fuzzy matching)")
     return unique_new_jobs_df
 
 def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
@@ -203,11 +205,11 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
     print("Handling cookie consent...")
     handle_cookies(driver)
 
-    # Load existing title+company pairs from DB to avoid duplicates
+    # Load existing jobs from DB to avoid duplicates using fuzzy matching
     with sqlite3.connect(db_path) as conn:
         cur = conn.cursor()
         cur.execute("SELECT title, company FROM jobs WHERE deleted = 0 OR deleted IS NULL")
-        existing_title_company = set((row[0], row[1]) for row in cur.fetchall())
+        existing_jobs = [(row[0], row[1]) for row in cur.fetchall()]
 
     # Extract domain from the URL for relative links
     parsed_url = urlparse(url)
@@ -227,17 +229,24 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
             if not job_cards:
                 print(f"No job cards found on page {page}. Stopping pagination.")
                 break
-            # --- Print how many jobs on this page are not yet in DB (by title+company) ---
-            page_title_company = set()
+            # --- Print how many jobs on this page are not yet in DB (using fuzzy matching) ---
+            page_jobs = []
             for job in job_cards:
                 title = job.find_element(By.XPATH, './/h2').text
                 try:
                     company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
                 except Exception:
                     company = ''
-                page_title_company.add((title, company))
-            new_jobs = [tc for tc in page_title_company if tc not in existing_title_company]
-            print(f"Page {page}: {len(new_jobs)} jobs (by title+company) are not yet in the DB and will be processed.")
+                page_jobs.append((title, company))
+            
+            new_jobs = []
+            for title, company in page_jobs:
+                is_duplicate = any(is_similar_job(title, company, existing_title, existing_company) 
+                                 for existing_title, existing_company in existing_jobs)
+                if not is_duplicate:
+                    new_jobs.append((title, company))
+            
+            print(f"Page {page}: {len(new_jobs)} jobs are not yet in the DB and will be processed (using fuzzy matching).")
             print("Processing job cards...")
             driver.execute_script("window.open('');")
             detail_window = driver.window_handles[-1]
@@ -252,8 +261,10 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
                     company = job.find_element(By.XPATH, './/span[@data-at="job-item-company-name"]').text.strip()
                 except Exception:
                     company = ''
-                # Skip if already in DB by (title, company)
-                if (title, company) in existing_title_company:
+                # Skip if similar job already exists in DB
+                is_duplicate = any(is_similar_job(title, company, existing_title, existing_company) 
+                                 for existing_title, existing_company in existing_jobs)
+                if is_duplicate:
                     continue
                 try:
                     location = job.find_element(By.XPATH, './/span[@data-at="job-item-location"]').text.strip()
@@ -293,11 +304,11 @@ def scrape_jobs_from_stepstone(url, pages=1, db_path="data/jobs.db"):
                 # Write to DB immediately using new schema
                 try:
                     conn.execute(
-                        "INSERT OR IGNORE INTO jobs (title, company, location, description, link, source) VALUES (?, ?, ?, ?, ?, 'stepstone')",
+                        "INSERT INTO jobs (title, company, location, description, link, source) VALUES (?, ?, ?, ?, ?, 'stepstone')",
                         (title, company, location, full_description, job_link)
                     )
                     conn.commit()
-                    existing_title_company.add((title, company))
+                    existing_jobs.append((title, company))
                 except Exception as e:
                     print(f"DB insert error for {job_link}: {e}")
             driver.switch_to.window(detail_window)
@@ -552,6 +563,33 @@ def get_experience_terms(level):
     
     # Default to "any" if the specified level is not found
     return experience_mapping.get(level.lower(), experience_mapping["any"])
+
+def normalize_text(text):
+    """Normalize text for better similarity matching."""
+    if not text:
+        return ""
+    # Convert to lowercase, remove extra spaces and common separators
+    normalized = re.sub(r'[^\w\s]', ' ', text.lower())
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+
+def is_similar_job(title1, company1, title2, company2, title_threshold=0.65, company_threshold=0.8):
+    """
+    Check if two jobs are similar using fuzzy string matching.
+    Returns True if both title and company are above their respective thresholds.
+    """
+    # Normalize texts
+    norm_title1 = normalize_text(title1)
+    norm_title2 = normalize_text(title2)
+    norm_company1 = normalize_text(company1)
+    norm_company2 = normalize_text(company2)
+    
+    # Calculate similarity ratios
+    title_similarity = difflib.SequenceMatcher(None, norm_title1, norm_title2).ratio()
+    company_similarity = difflib.SequenceMatcher(None, norm_company1, norm_company2).ratio()
+    
+    return title_similarity >= title_threshold and company_similarity >= company_threshold
 
 def main():
     db_path = "data/jobs.db"
