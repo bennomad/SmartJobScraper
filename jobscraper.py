@@ -460,6 +460,9 @@ def filter_and_output_jobs(jobs_df, filter_results, db_path="data/jobs.db"):
     """
     step1_titles, step2_titles, step3_titles = filter_results
     
+    # Create a proper copy to avoid SettingWithCopyWarning
+    jobs_df = jobs_df.copy()
+    
     # Convert job titles in DataFrame to lowercase for case-insensitive matching
     jobs_df['title_lower'] = jobs_df['title'].str.lower()
     
