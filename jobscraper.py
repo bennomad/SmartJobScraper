@@ -414,6 +414,19 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
     # Sort by company name if the column exists
     if 'company' in display_df.columns:
         display_df = display_df.sort_values(by='company', na_position='last').reset_index(drop=True)
+
+    # --- Add search filter ---
+    search_query = st.text_input("Search jobs (title, company, location):", "")
+    if search_query:
+        search_query_lower = search_query.lower()
+        display_df = display_df[
+            display_df['title'].str.lower().str.contains(search_query_lower, na=False) |
+            (display_df['company'].str.lower().str.contains(search_query_lower, na=False) if 'company' in display_df.columns else False) |
+            (display_df['location'].str.lower().str.contains(search_query_lower, na=False) if 'location' in display_df.columns else False)
+        ]
+        display_df = display_df.reset_index(drop=True)
+        st.write(f"{len(display_df)} jobs match your search.")
+
     # Show title, company, location, and link in the main table, and make link clickable
     columns = ['title', 'company', 'location', 'link', 'Select']
     columns = [col for col in columns if col in display_df.columns]
