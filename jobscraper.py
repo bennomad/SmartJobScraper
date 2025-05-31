@@ -426,6 +426,9 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
         ]
         display_df = display_df.reset_index(drop=True)
         st.write(f"{len(display_df)} jobs match your search.")
+        # Auto-select if only one result
+        if len(display_df) == 1:
+            display_df.at[0, 'Select'] = True
 
     # Show title, company, location, and link in the main table, and make link clickable
     columns = ['title', 'company', 'location', 'link', 'Select']
