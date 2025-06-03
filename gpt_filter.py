@@ -5,6 +5,10 @@ import sys
 import pandas as pd
 import sqlite3
 
+def is_analyzed(job):
+    val = job.get('analyzed', 0)
+    return str(val) == "1" or val == 1
+
 def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid, homeoffice_required=False, jobs_to_include=None, experience_level=None, db_path="data/jobs.db"):
     """
     jobs: list of dicts, each with 'title' and 'description' and optionally 'analyzed' and 'id'
@@ -23,7 +27,9 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
         jobs_to_include = []
 
     # Skip jobs that have already been analyzed
-    jobs = [job for job in jobs if not job.get('analyzed', 0)]
+    already_analyzed = len([job for job in jobs if is_analyzed(job)])
+    print(f"Skipping {already_analyzed} jobs that were already analyzed")
+    jobs = [job for job in jobs if not is_analyzed(job)]
 
     # Manual filter: if experience_level is 'junior', drop all jobs with 'senior ' in the title
     if experience_level and experience_level.lower() == 'junior':
@@ -34,7 +40,6 @@ def filter_jobs_by_interest(openai_api_key, jobs, user_interests, jobs_to_avoid,
         
     client = OpenAI(api_key=openai_api_key)
 
-    print("Total jobs:", len(jobs))
     batch_size = 40  
     batches = [jobs[i:i + batch_size] for i in range(0, len(jobs), batch_size)]
     print(f"Splitting the total jobs into {len(batches)} API requests.")

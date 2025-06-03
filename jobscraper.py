@@ -411,8 +411,14 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
 
     display_df = display_df.reset_index(drop=True)
     display_df['Select'] = False
-    # Sort by company name if the column exists
-    if 'company' in display_df.columns:
+    # Sort by created_at date (newest first) if the column exists
+    if 'created_at' in display_df.columns:
+        # Convert created_at to datetime if it's not already
+        if not pd.api.types.is_datetime64_any_dtype(display_df['created_at']):
+            display_df['created_at'] = pd.to_datetime(display_df['created_at'])
+        display_df = display_df.sort_values(by='created_at', ascending=False, na_position='last').reset_index(drop=True)
+    elif 'company' in display_df.columns:
+        # Fallback to company sorting if created_at is not available
         display_df = display_df.sort_values(by='company', na_position='last').reset_index(drop=True)
 
     # --- Add search filter ---
@@ -430,18 +436,28 @@ def run_streamlit_dashboard(jobs_df=None, db_path="data/jobs.db"):
         if len(display_df) == 1:
             display_df.at[0, 'Select'] = True
 
-    # Show title, company, location, and link in the main table, and make link clickable
-    columns = ['title', 'company', 'location', 'link', 'Select']
+    # Show title, company, location, date, and link in the main table, and make link clickable
+    columns = ['created_at', 'title', 'company', 'location', 'link', 'Select']
     columns = [col for col in columns if col in display_df.columns]
     table_df = display_df[columns].copy()
+    
+    # Format the created_at column for better display
+    if 'created_at' in table_df.columns:
+        if not pd.api.types.is_datetime64_any_dtype(table_df['created_at']):
+            table_df['created_at'] = pd.to_datetime(table_df['created_at'])
+        table_df['created_at'] = table_df['created_at'].dt.strftime('%Y-%m-%d %H:%M')
+    
     selected = st.data_editor(
         table_df,
         use_container_width=True,
         num_rows="dynamic",
-        disabled=[col for col in ['title', 'link', 'company', 'location'] if col in table_df.columns],
+        disabled=[col for col in ['created_at', 'title', 'link', 'company', 'location'] if col in table_df.columns],
         column_config={
+            "created_at": st.column_config.TextColumn("Date", width="small"),
             "link": st.column_config.LinkColumn("Link", display_text="Open Link")
-        } if 'link' in table_df.columns else None
+        } if 'link' in table_df.columns else {
+            "created_at": st.column_config.TextColumn("Date", width="small")
+        } if 'created_at' in table_df.columns else None
     )
     
     # Delete selected jobs
@@ -663,7 +679,7 @@ def main():
             # If deleted column doesn't exist, use all jobs
             jobs_with_filter = jobs_df
             
-        jobs_list = jobs_with_filter[['id', 'title', 'description', 'company']].to_dict(orient='records')
+        jobs_list = jobs_with_filter[['id', 'title', 'description', 'company', 'analyzed']].to_dict(orient='records')
         filter_results = filter_jobs_by_interest(openai_api_key, jobs_list, user_interests, jobs_to_avoid, homeoffice_required, jobs_to_include, experience_level, db_path)
         print(f"Processing of jobs complete:")
         print(f"  - Step 1 (Basic filtering): {len(filter_results[0])} jobs")
